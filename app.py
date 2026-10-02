@@ -890,7 +890,10 @@ class PanelWindow(QWidget):
         self.seg_ring.set_value(rm if rm in ("left", "used") else "left")
         self.seg_src.set_value(st.get("ring_source", "auto"))
         self.seg_theme.set_value(st.get("theme", "follow"))
-        self.seg_ref.set_value(str(st.get("refresh_secs", 300)))
+        rf = st.get("refresh_secs", 300)
+        if str(rf) not in self.seg_ref.btns:
+            rf = min((300, 600, 3000), key=lambda x: abs(x - rf))
+        self.seg_ref.set_value(str(rf))
         self.seg_login.set_value("true" if st.get("start_on_login") else "false")
         self.seg_devin.set_value("true" if st.get("devin_hook") else "false")
         # data
@@ -960,18 +963,40 @@ class PanelWindow(QWidget):
                 if ny != g.y():
                     self.move(g.x(), ny)
         else:
+            # collapse AND re-anchor vertically, so the compact card hugs
+            # the orb again instead of staying where the tall panel ended
+            cur = self.settings.height() if self.settings.isVisible() else 0
+            h_small = g.height() - cur
+            oc = ORB.geometry().center()
+            scr = QGuiApplication.screenAt(oc) \
+                or QGuiApplication.primaryScreen()
+            a = scr.availableGeometry()
+            py = oc.y() - h_small / 2
+            py = int(max(a.top() + 8, min(py, a.bottom() - h_small - 8)))
             if animate and self.isVisible():
                 self._anim_set.stop()
                 self._anim_set.setDuration(260)
                 self._anim_set.setEasingCurve(QEasingCurve.InOutCubic)
-                self._anim_set.setStartValue(self.settings.maximumHeight())
+                self._anim_set.setStartValue(self.settings.height())
                 self._anim_set.setEndValue(0)
                 self._anim_set.start()
+                if py != g.y():
+                    self._anim_move.stop()
+                    self._anim_move.setDuration(260)
+                    self._anim_move.setEasingCurve(QEasingCurve.InOutCubic)
+                    self._anim_move.setStartValue(g.topLeft())
+                    self._anim_move.setEndValue(QPoint(g.x(), py))
+                    self._anim_move.start()
             else:
                 self.settings.setVisible(False)
+                if py != g.y():
+                    self.move(g.x(), py)
 
     def _on_set_finished(self):
-        if not self._set_open and self.settings.maximumHeight() == 0:
+        if self._set_open:
+            # let the drawer auto-adapt to its content after the animation
+            self.settings.setMaximumHeight(16777215)
+        elif self.settings.maximumHeight() == 0:
             self.settings.setVisible(False)
 
     def pop_show(self, target: QRect, side: float):
