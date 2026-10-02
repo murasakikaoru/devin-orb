@@ -94,6 +94,7 @@ def start_listener(on_notify, log):
 
     def _hook_cb(hook, event, hwnd, id_obj, id_child, tid, ms):
         if hwnd and _is_toast_flyout(hwnd):
+            u32.ShowWindow(hwnd, 0)  # SW_HIDE — suppress Windows' own banner
             flyouts.put(hwnd)
 
     hook_proc = WINEVENTPROC(_hook_cb)  # keep a ref alive
@@ -131,7 +132,9 @@ def start_listener(on_notify, log):
                         except Exception as e:
                             log(f"notify: flyout read err {e!r}")
                             texts = []
-                        if texts and texts[0].lower() == "devin":
+                        is_devin = bool(
+                            texts and texts[0].lower() == "devin")
+                        if is_devin:
                             body = " — ".join(texts[1:]).strip()
                             if body:
                                 now = time.time()
@@ -145,6 +148,10 @@ def start_listener(on_notify, log):
                                         title, body = head.strip(), \
                                             rest.strip()
                                     on_notify(title, body)
+                        else:
+                            # not Devin's toast (or unreadable) — restore the
+                            # banner we suppressed so other apps still work
+                            u32.ShowWindow(hwnd, 5)  # SW_SHOW
                     time.sleep(0.1)
         except Exception as e:
             log(f"notify loop died: {e!r}")

@@ -9,6 +9,8 @@ Run:  python app.py      (or pythonw app.py for no console)
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes as wt
 import math
 import os
 import sys
@@ -1248,6 +1250,57 @@ BUB_W = 268
 BUB_TAIL = 9
 
 
+def raise_devin_window():
+    """Bring the Devin Desktop main window to the foreground."""
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        found = []
+        CMP = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                                 ctypes.c_void_p)
+
+        def _cb(hwnd, _):
+            if not u32.IsWindowVisible(hwnd):
+                return True
+            pid = wt.DWORD(0)
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            h = k32.OpenProcess(0x1000, False, pid.value)
+            if not h:
+                return True
+            buf = ctypes.create_unicode_buffer(260)
+            n = wt.DWORD(260)
+            ok = k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
+            k32.CloseHandle(h)
+            if ok and buf.value.rsplit(chr(92), 1)[-1].lower() == "devin.exe":
+                r = wt.RECT()
+                u32.GetWindowRect(hwnd, ctypes.byref(r))
+                if r.right - r.left > 200 and r.bottom - r.top > 200:
+                    found.append((hwnd, (r.right - r.left) *
+                                 (r.bottom - r.top)))
+            return True
+
+        u32.EnumWindows(CMP(_cb), None)
+        if not found:
+            return
+        hwnd = max(found, key=lambda x: x[1])[0]
+        if u32.IsIconic(hwnd):
+            u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        # foreground lock workaround: join input queues so Windows lets us
+        # steal foreground, then detach
+        cur_tid = k32.GetCurrentThreadId()
+        fg = u32.GetForegroundWindow()
+        fg_tid = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = False
+        if fg_tid and fg_tid != cur_tid:
+            attached = bool(u32.AttachThreadInput(cur_tid, fg_tid, True))
+        u32.BringWindowToTop(hwnd)
+        u32.SetForegroundWindow(hwnd)
+        if attached:
+            u32.AttachThreadInput(cur_tid, fg_tid, False)
+    except Exception:
+        pass
+
+
 class NotifyBubble(QWidget):
     """Small speech-bubble that pops above the orb when Devin sends a toast."""
 
@@ -1258,6 +1311,7 @@ class NotifyBubble(QWidget):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedWidth(BUB_W)
+        self.setCursor(Qt.PointingHandCursor)
         self._tail_x = BUB_W / 2
         self._tail_top = False        # tail on top (bubble shown under orb)
 
@@ -1361,6 +1415,7 @@ class NotifyBubble(QWidget):
 
     def mousePressEvent(self, e):
         self.dismiss()
+        threading.Thread(target=raise_devin_window, daemon=True).start()
 
     def paintEvent(self, _):
         p = QPainter(self)
