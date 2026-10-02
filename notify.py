@@ -20,8 +20,10 @@ import queue
 import threading
 import time
 
+EVENT_OBJECT_SHOW = 0x8002
 EVENT_OBJECT_NAMECHANGE = 0x800C
 WINEVENT_OUTOFCONTEXT = 0x0000
+SUPPRESS_SECS = 15  # keep re-hiding a suppressed flyout until the toast dies
 
 
 def _window_proc_name(hwnd) -> str:
@@ -91,11 +93,21 @@ def start_listener(on_notify, log):
         wt.DWORD, wt.DWORD)
 
     flyouts: queue.Queue = queue.Queue()
+    suppressed = {}  # hwnd -> deadline; shell re-shows the flyout for the
+                     # dismiss animation, so we keep hiding it until it dies
 
     def _hook_cb(hook, event, hwnd, id_obj, id_child, tid, ms):
-        if hwnd and _is_toast_flyout(hwnd):
+        if not hwnd:
+            return
+        if event == EVENT_OBJECT_NAMECHANGE and _is_toast_flyout(hwnd):
             u32.ShowWindow(hwnd, 0)  # SW_HIDE — suppress Windows' own banner
+            suppressed.pop(hwnd, None)  # same hwnd is reused per toast
             flyouts.put(hwnd)
+        elif event == EVENT_OBJECT_SHOW and hwnd in suppressed:
+            if time.time() < suppressed[hwnd]:
+                u32.ShowWindow(hwnd, 0)
+            else:
+                suppressed.pop(hwnd, None)
 
     hook_proc = WINEVENTPROC(_hook_cb)  # keep a ref alive
 
@@ -104,6 +116,9 @@ def start_listener(on_notify, log):
             with auto.UIAutomationInitializerInThread():
                 hook = u32.SetWinEventHook(
                     EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                    0, hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
+                hook2 = u32.SetWinEventHook(
+                    EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
                     0, hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
                 if not hook:
                     log("notify: SetWinEventHook failed")
@@ -120,6 +135,9 @@ def start_listener(on_notify, log):
                     while u32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
                         u32.TranslateMessage(ctypes.byref(msg))
                         u32.DispatchMessageW(ctypes.byref(msg))
+                    for h in [h for h, d in suppressed.items()
+                              if time.time() > d]:
+                        del suppressed[h]
                     try:
                         hwnd = flyouts.get_nowait()
                     except queue.Empty:
@@ -135,6 +153,7 @@ def start_listener(on_notify, log):
                         is_devin = bool(
                             texts and texts[0].lower() == "devin")
                         if is_devin:
+                            suppressed[hwnd] = time.time() + SUPPRESS_SECS
                             body = " — ".join(texts[1:]).strip()
                             if body:
                                 now = time.time()

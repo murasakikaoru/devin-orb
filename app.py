@@ -1295,6 +1295,8 @@ def raise_devin_window():
             attached = bool(u32.AttachThreadInput(cur_tid, fg_tid, True))
         u32.BringWindowToTop(hwnd)
         u32.SetForegroundWindow(hwnd)
+        # SwitchToThisWindow ignores the foreground lock entirely
+        u32.SwitchToThisWindow(hwnd, True)
         if attached:
             u32.AttachThreadInput(cur_tid, fg_tid, False)
     except Exception:
