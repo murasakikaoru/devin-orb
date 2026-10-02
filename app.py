@@ -163,6 +163,10 @@ class OrbWindow(QWidget):
     openRequested = Signal()        # single click (after dblclick guard)
     pinRequested = Signal()         # double click
     contextRequested = Signal()     # right click
+    moved = Signal()                # position changed (panel follows)
+
+    SNAP_PX = 60                    # release within this of an edge -> dock
+    IDLE_MS = 2600                  # idle at edge before auto-retracting
 
     def __init__(self):
         super().__init__(None,
@@ -184,9 +188,75 @@ class OrbWindow(QWidget):
         self._moved = False
         self._click_guard = False   # suppress click right after double-click
 
+        # edge docking: 'L' | 'R' | None; _docked_in = retracted half-circle
+        self._dock_edge = None
+        self._docked_in = False
+        self._suppress_click = False
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(280)
+        self._slide.setEasingCurve(QEasingCurve.InOutCubic)
+        self._slide.valueChanged.connect(lambda _v: self.moved.emit())
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.timeout.connect(self._retract)
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(ANIM_MS)
+
+    # -- edge docking -----------------------------------------------------------
+
+    def _avail(self):
+        scr = QGuiApplication.screenAt(self.geometry().center()) \
+            or QGuiApplication.primaryScreen()
+        return scr.availableGeometry()
+
+    def _detect_edge(self):
+        """'L'/'R' if the window hugs a screen edge, else None."""
+        a = self._avail()
+        if abs(self.x() - a.left()) <= self.SNAP_PX:
+            return 'L'
+        if abs(self.x() + ORB_WIN - (a.right() + 1)) <= self.SNAP_PX:
+            return 'R'
+        return None
+
+    def _flush_x(self):
+        a = self._avail()
+        return (a.right() - ORB_WIN + 1) if self._dock_edge == 'R' else a.left()
+
+    def _in_x(self):
+        """Center exactly on the edge -> only the inner half-circle shows."""
+        a = self._avail()
+        return (a.right() - ORB_WIN // 2 + 1) if self._dock_edge == 'R' \
+            else a.left() - ORB_WIN // 2
+
+    def _slide_to(self, x):
+        self._slide.stop()
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(QPoint(int(x), self.y()))
+        self._slide.start()
+
+    def _arm_idle(self):
+        if self._dock_edge and not self._docked_in \
+                and self._drag_off is None:
+            self._idle.start(self.IDLE_MS)
+
+    def _retract(self):
+        if not self._dock_edge or self._drag_off is not None:
+            return
+        self._docked_in = True
+        self._slide_to(self._in_x())
+
+    def _expand(self):
+        self._idle.stop()
+        if self._docked_in:
+            self._docked_in = False
+            self._slide_to(self._flush_x())
+
+    def dock_check(self):
+        """Startup: adopt docked state if the saved position hugs an edge."""
+        self._dock_edge = self._detect_edge()
+        self._arm_idle()
 
     # -- public state -------------------------------------------------------
 
@@ -218,19 +288,30 @@ class OrbWindow(QWidget):
 
     def enterEvent(self, e):
         self._hover_t = 1.0
+        self._expand()              # hover pulls a retracted orb back out
 
     def leaveEvent(self, e):
         self._hover_t = 0.0
         self._press_t = 0.0
+        self._arm_idle()            # re-arm the retract timer
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._press_t = 1.0
+            if self._docked_in:
+                # first contact just pulls the orb out; it doesn't open
+                self._suppress_click = True
+                self._expand()
+            self._idle.stop()
             self._drag_off = e.globalPosition().toPoint() - self.pos()
             self._moved = False
 
     def mouseMoveEvent(self, e):
         if self._drag_off is None:
+            # window may have slid under a stationary cursor during retract —
+            # no enterEvent fires then, so treat any move as contact too
+            if self._docked_in:
+                self._expand()
             return
         gp = e.globalPosition().toPoint()
         if not self._moved and (gp - self.pos() - self._drag_off).manhattanLength() > 4:
@@ -238,6 +319,7 @@ class OrbWindow(QWidget):
             self._press_t = 0.0
         if self._moved:
             self.move(gp - self._drag_off)
+            self.moved.emit()       # panel tracks the orb live
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
@@ -247,12 +329,20 @@ class OrbWindow(QWidget):
         self._drag_off = None
         self._moved = False
         if was_drag:
-            config.update(orb_x=self.x(), orb_y=self.y())
-        elif not self._click_guard:
+            self._dock_edge = self._detect_edge()
+            if self._dock_edge:
+                self._slide_to(self._flush_x())
+                self._arm_idle()
+                config.update(orb_x=self._flush_x(), orb_y=self.y())
+            else:
+                config.update(orb_x=self.x(), orb_y=self.y())
+        elif not self._click_guard and not self._suppress_click:
             self._ripples.append(time.monotonic())
             # guard so a double-click doesn't fire open+pin
             QTimer.singleShot(QApplication.doubleClickInterval(),
                               self._emit_open)
+        self._suppress_click = False
+        self._arm_idle()
 
     def _emit_open(self):
         if not self._click_guard:
@@ -268,6 +358,7 @@ class OrbWindow(QWidget):
         self._click_guard = False
 
     def contextMenuEvent(self, e):
+        self._expand()
         self.contextRequested.emit()
 
     # -- painting -------------------------------------------------------------
@@ -1144,6 +1235,14 @@ def on_orb_context():
     show_panel(open_settings=True)
 
 
+def on_orb_moved():
+    """Panel stays glued to the orb while it drags or slides."""
+    if PANEL and PANEL.isVisible() and not PANEL._closing:
+        px, py, side = panel_anchor_position()
+        PANEL._side = side
+        PANEL.move(px, py)
+
+
 def apply_setting(key, value):
     if key not in ("dblclick_pin", "ring_mode", "ring_source", "theme",
                    "start_on_login", "devin_hook", "refresh_secs", "language"):
@@ -1230,6 +1329,7 @@ def main():
     ORB.openRequested.connect(on_orb_click)
     ORB.pinRequested.connect(on_orb_dblclick)
     ORB.contextRequested.connect(on_orb_context)
+    ORB.moved.connect(on_orb_moved)
     BUS.poke.connect(lambda: (push_orb(), push_panel()))
 
     # position: saved or default (right edge, upper third)
@@ -1242,6 +1342,7 @@ def main():
     oy = max(scr.top(), min(int(oy), scr.bottom() - ORB_WIN))
     ORB.move(ox, oy)
     ORB.show()
+    ORB.dock_check()
 
     # first run: inject the SessionStart hook so the orb also launches with
     # Devin sessions (removable via the settings toggle).
