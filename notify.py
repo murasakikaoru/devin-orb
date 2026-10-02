@@ -100,8 +100,10 @@ def start_listener(on_notify, log):
         if not hwnd:
             return
         if event == EVENT_OBJECT_NAMECHANGE and _is_toast_flyout(hwnd):
-            u32.ShowWindow(hwnd, 0)  # SW_HIDE — suppress Windows' own banner
+            # do NOT hide yet — we don't know whose toast this is; other
+            # apps' banners must stay untouched
             suppressed.pop(hwnd, None)  # same hwnd is reused per toast
+            log("notify: flyout event")
             flyouts.put(hwnd)
         elif event == EVENT_OBJECT_SHOW and hwnd in suppressed:
             if time.time() < suppressed[hwnd]:
@@ -114,14 +116,18 @@ def start_listener(on_notify, log):
     def run():
         try:
             with auto.UIAutomationInitializerInThread():
+                # NOTE: pid-scoping the hooks does not work — the flyout's
+                # events are raised by a system component on behalf of
+                # ShellExperienceHost, not by the process itself. Global
+                # scope it is; the callback is a cheap dict/class check.
                 hook = u32.SetWinEventHook(
                     EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
                     0, hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
                 hook2 = u32.SetWinEventHook(
                     EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
                     0, hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
-                if not hook:
-                    log("notify: SetWinEventHook failed")
+                if not hook or not hook2:
+                    log(f"notify: SetWinEventHook failed h={hook},{hook2}")
                     return
                 log("notify: watching toast flyout for Devin notifications")
 
@@ -143,16 +149,22 @@ def start_listener(on_notify, log):
                     except queue.Empty:
                         hwnd = 0
                     if hwnd:
-                        # let the flyout's UIA tree populate
-                        time.sleep(0.7)
-                        try:
-                            texts = _flyout_texts(hwnd)
-                        except Exception as e:
-                            log(f"notify: flyout read err {e!r}")
-                            texts = []
-                        is_devin = bool(
-                            texts and texts[0].lower() == "devin")
-                        if is_devin:
+                        # Read the flyout's UIA tree first; the toast stays
+                        # visible while we identify it (brief flash only for
+                        # Devin). Retry briefly — the tree lags the event.
+                        texts = []
+                        deadline = time.time() + 1.0
+                        while time.time() < deadline:
+                            try:
+                                texts = _flyout_texts(hwnd)
+                            except Exception:
+                                texts = []
+                            if texts:
+                                break
+                            time.sleep(0.12)
+                        log(f"notify: flyout texts {texts[:5]!r}")
+                        if texts and texts[0].lower() == "devin":
+                            u32.ShowWindow(hwnd, 0)  # hide the banner
                             suppressed[hwnd] = time.time() + SUPPRESS_SECS
                             body = " — ".join(texts[1:]).strip()
                             if body:
@@ -167,11 +179,8 @@ def start_listener(on_notify, log):
                                         title, body = head.strip(), \
                                             rest.strip()
                                     on_notify(title, body)
-                        else:
-                            # not Devin's toast (or unreadable) — restore the
-                            # banner we suppressed so other apps still work
-                            u32.ShowWindow(hwnd, 5)  # SW_SHOW
-                    time.sleep(0.1)
+                        # non-Devin (or unreadable): never touched the window
+                    time.sleep(0.05)
         except Exception as e:
             log(f"notify loop died: {e!r}")
 
