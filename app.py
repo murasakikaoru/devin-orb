@@ -20,6 +20,7 @@ sys.path.insert(0, BASE_DIR)
 
 import config
 import core
+import notify
 
 APP_DIR = config._config_dir()
 LOG_PATH = os.path.join(APP_DIR, "orb.log")
@@ -193,6 +194,7 @@ class OrbWindow(QWidget):
         self._dock_edge = None
         self._docked_in = False
         self._suppress_click = False
+        self._bounce_t0 = 0.0        # notification bounce birth time
         self._slide = QPropertyAnimation(self, b"pos", self)
         self._slide.setDuration(280)
         self._slide.setEasingCurve(QEasingCurve.InOutCubic)
@@ -259,6 +261,12 @@ class OrbWindow(QWidget):
         self._dock_edge = self._detect_edge()
         self._arm_idle()
 
+    def bounce(self):
+        """Notification arrived — springy double-pop + pull out of the edge."""
+        self._bounce_t0 = time.monotonic()
+        self._expand()
+        self._arm_idle()
+
     # -- public state -------------------------------------------------------
 
     def set_theme(self, t: str):
@@ -297,6 +305,10 @@ class OrbWindow(QWidget):
         self._arm_idle()            # re-arm the retract timer
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.MiddleButton:
+            # hidden test trigger: fake a Devin toast
+            BUS.notify.emit("Devin", "测试通知 —— 会话完成了一个任务。")
+            return
         if e.button() == Qt.LeftButton:
             self._press_t = 1.0
             if self._docked_in:
@@ -388,6 +400,13 @@ class OrbWindow(QWidget):
         c = self.width() / 2
         breathe = 1.0 + 0.018 * math.sin(t * 2 * math.pi / 3.6)
         scale = breathe * (1 + 0.05 * self._hover - 0.10 * self._press)
+        dy = 0.0
+        bt = time.monotonic() - self._bounce_t0
+        if bt < 1.3:
+            # decaying spring: scale pop + little hop
+            k = math.exp(-3.4 * bt)
+            scale *= 1.0 + 0.16 * k * math.sin(bt * 15)
+            dy = -7.0 * k * abs(math.sin(bt * 8))
 
         col = self._colors()
         dark = self._theme == "dark"
@@ -414,7 +433,7 @@ class OrbWindow(QWidget):
         p.drawEllipse(QPointF(c, c + 5), BALL_R * 1.28, BALL_R * 1.18)
 
         p.save()
-        p.translate(c, c)
+        p.translate(c, c + dy)
         p.scale(scale, scale)
 
         # ---- glass sphere ----------------------------------------------------
@@ -505,11 +524,12 @@ class OrbWindow(QWidget):
         p.restore()
 
         # ---- quota ring --------------------------------------------------------
+        cy = c + dy
         ring_pen = QPen(col["track"], 2.6)
         ring_pen.setCapStyle(Qt.RoundCap)
         p.setPen(ring_pen)
         p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPointF(c, c), RING_R, RING_R)
+        p.drawEllipse(QPointF(c, cy), RING_R, RING_R)
 
         if self._pct is not None:
             pct = max(0.0, min(100.0, self._pct))
@@ -518,14 +538,14 @@ class OrbWindow(QWidget):
                          col["warn"] if pct >= 20 else col["bad"])
             if self._stale:
                 arc_color.setAlpha(int(140 + 100 * (0.5 + 0.5 * math.sin(t * 4))))
-            con = QConicalGradient(QPointF(c, c), 90)
+            con = QConicalGradient(QPointF(c, cy), 90)
             con.setColorAt(0.0, col["accent_hot"] if not self._stale else arc_color)
             con.setColorAt(min(pct / 100.0, 0.999), arc_color)
             con.setColorAt(min(pct / 100.0 + 0.001, 1.0), arc_color)
             pen = QPen(con if not self._stale else arc_color, 2.6)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
-            rect = QRectF(c - RING_R, c - RING_R, RING_R * 2, RING_R * 2)
+            rect = QRectF(c - RING_R, cy - RING_R, RING_R * 2, RING_R * 2)
             p.drawArc(rect, 90 * 16, int(-pct * 3.6 * 16))
 
         # error dot
@@ -533,13 +553,13 @@ class OrbWindow(QWidget):
             pulse = 0.5 + 0.5 * math.sin(t * 4.4)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(248, 113, 113, int(160 + 90 * pulse)))
-            p.drawEllipse(QPointF(c + RING_R * 0.72, c - RING_R * 0.72), 4.2, 4.2)
+            p.drawEllipse(QPointF(c + RING_R * 0.72, cy - RING_R * 0.72), 4.2, 4.2)
 
         # click ripples
         for t0 in self._ripples:
             age = time.monotonic() - t0
             k = age / 0.55
-            rp = QRadialGradient(QPointF(c, c), BALL_R + k * 26)
+            rp = QRadialGradient(QPointF(c, cy), BALL_R + k * 26)
             alpha = int(120 * (1 - k))
             rp.setColorAt(0.0, QColor(0, 0, 0, 0))
             rp.setColorAt(0.85, QColor(col["accent"].red(), col["accent"].green(),
@@ -547,7 +567,7 @@ class OrbWindow(QWidget):
             rp.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.setBrush(rp)
             p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(c, c), BALL_R + k * 26, BALL_R + k * 26)
+            p.drawEllipse(QPointF(c, cy), BALL_R + k * 26, BALL_R + k * 26)
 
         p.end()
 
@@ -1221,6 +1241,150 @@ class PanelWindow(QWidget):
         return super().event(e)
 
 
+# --- notification bubble -------------------------------------------------------
+
+BUB = None
+BUB_W = 268
+BUB_TAIL = 9
+
+
+class NotifyBubble(QWidget):
+    """Small speech-bubble that pops above the orb when Devin sends a toast."""
+
+    LIFE_MS = 9000
+
+    def __init__(self):
+        super().__init__(None,
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(BUB_W)
+        self._tail_x = BUB_W / 2
+        self._tail_top = False        # tail on top (bubble shown under orb)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, BUB_TAIL)
+        outer.setSpacing(0)
+        outer.setSizeConstraint(QLayout.SetFixedSize)
+
+        self.card = QFrame(objectName="card")
+        lay = QVBoxLayout(self.card)
+        lay.setContentsMargins(13, 10, 13, 10)
+        lay.setSpacing(3)
+        self.title = QLabel("", objectName="btitle")
+        self.body = QLabel("", objectName="bbody")
+        self.body.setWordWrap(True)
+        lay.addWidget(self.title)
+        lay.addWidget(self.body)
+        outer.addWidget(self.card)
+
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._life = QTimer(self)
+        self._life.setSingleShot(True)
+        self._life.timeout.connect(self.dismiss)
+        self.adjustSize()
+
+    def apply_theme(self, dark):
+        p = PAL["dark" if dark else "light"]
+        self.card.setStyleSheet(CARD_QSS.format(
+            cardbg=p["cardbg"], border=p["border"], text=p["text"],
+            dim=p["dim"], btn=p["btn"], btnhov=p["btnhov"],
+            accent=p["accent"],
+            trackqss=f"rgba({p['track'].red()},{p['track'].green()},"
+                     f"{p['track'].blue()},{p['track'].alpha()})") +
+            "\nQLabel#btitle { font-size:12.5px; font-weight:700; }"
+            "\nQLabel#bbody  { font-size:11.5px; color:" + p["dim"] + "; }")
+        self._tailc = QColor(22, 22, 26, 242) if dark \
+            else QColor(246, 248, 251, 242)
+        self.update()
+
+    def show_notify(self, title, body):
+        self.title.setText(title or "Devin")
+        body = (body or "").strip()
+        if len(body) > 160:
+            body = body[:160].rstrip() + "…"
+        self.body.setText(body)
+        self.apply_theme(theme() == "dark")
+        self.adjustSize()
+
+        # anchor: bubble bottom-center sits above the orb's top-center
+        og = ORB.geometry()
+        oc = og.center()
+        scr = QGuiApplication.screenAt(oc) or QGuiApplication.primaryScreen()
+        a = scr.availableGeometry()
+        w, h = self.width(), self.height()
+        bx = int(oc.x() - w / 2)
+        bx = max(a.left() + 8, min(bx, a.right() - w - 8))
+        self._tail_x = min(max(oc.x() - bx, 24), w - 24)
+        by = og.top() - h - 6
+        self._tail_top = False
+        if by < a.top() + 6:            # no room above -> under the orb
+            by = og.bottom() + 6
+            self._tail_top = True
+        lay = self.layout()
+        lay.setContentsMargins(0, BUB_TAIL if self._tail_top else 0,
+                               0, 0 if self._tail_top else BUB_TAIL)
+        self.adjustSize()
+        h = self.height()
+        if self._tail_top:
+            by = og.bottom() + 6
+
+        # entrance: fade + slide out of the orb
+        start_y = by + (10 if not self._tail_top else -10)
+        self.move(bx, start_y)
+        self.setWindowOpacity(0.0)
+        self.show()
+        self.raise_()
+        self._slide.stop()
+        self._slide.setDuration(260)
+        self._slide.setEasingCurve(QEasingCurve.OutBack)
+        self._slide.setStartValue(QPoint(bx, start_y))
+        self._slide.setEndValue(QPoint(bx, by))
+        self._slide.start()
+        self._fade.stop()
+        self._fade.setDuration(180)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+        self._life.start(self.LIFE_MS)
+
+    def dismiss(self):
+        if not self.isVisible():
+            return
+        self._life.stop()
+        self._fade.stop()
+        self._fade.setDuration(160)
+        self._fade.setStartValue(self.windowOpacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+        QTimer.singleShot(180, self.hide)
+
+    def mousePressEvent(self, e):
+        self.dismiss()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        tx = self._tail_x
+        p.setPen(Qt.NoPen)
+        p.setBrush(getattr(self, "_tailc", QColor(22, 22, 26, 242)))
+        if self._tail_top:
+            p.drawPolygon([QPointF(tx - 7, BUB_TAIL + 1), QPointF(tx + 7, BUB_TAIL + 1),
+                           QPointF(tx, 0)])
+        else:
+            y0 = self.height() - BUB_TAIL - 1
+            p.drawPolygon([QPointF(tx - 7, y0), QPointF(tx + 7, y0),
+                           QPointF(tx, self.height())])
+        p.end()
+
+
+def on_devin_notify(title, body):
+    """GUI-thread entry: bounce the orb and pop the bubble."""
+    ORB.bounce()
+    BUB.show_notify(title, body)
+
+
 def panel_anchor_position() -> tuple:
     """Panel x,y anchored beside the orb; returns (px, py, side)."""
     oc = ORB.geometry().center()
@@ -1339,6 +1503,7 @@ def push_panel():
 class Bus(QObject):
     """Thread-safe wake-up into the GUI thread."""
     poke = Signal()
+    notify = Signal(str, str)
 
 
 BUS = Bus()
@@ -1370,7 +1535,7 @@ def theme_watch_loop():
 # --- main -----------------------------------------------------------------------
 
 def main():
-    global APP, ORB, PANEL
+    global APP, ORB, PANEL, BUB
     if not ensure_single_instance():
         log("another instance running; exiting")
         return
@@ -1381,11 +1546,13 @@ def main():
 
     ORB = OrbWindow()
     PANEL = PanelWindow()
+    BUB = NotifyBubble()
 
     ORB.openRequested.connect(on_orb_click)
     ORB.pinRequested.connect(on_orb_dblclick)
     ORB.contextRequested.connect(on_orb_context)
     ORB.moved.connect(on_orb_moved)
+    BUS.notify.connect(lambda t, b: on_devin_notify(t, b))
     BUS.poke.connect(lambda: (push_orb(), push_panel()))
 
     # position: saved or default (right edge, upper third)
@@ -1407,6 +1574,7 @@ def main():
 
     threading.Thread(target=refresh_loop, daemon=True).start()
     threading.Thread(target=theme_watch_loop, daemon=True).start()
+    notify.start_listener(lambda t, b: BUS.notify.emit(t, b), log)
 
     APP.exec()
     config.update(orb_x=ORB.x(), orb_y=ORB.y())
