@@ -1,118 +1,152 @@
-"""Watch Windows Action Center for Devin toast notifications.
+"""Intercept Devin Windows toast notifications for the orb.
 
-Uses WinRT UserNotificationListener (works from unpackaged desktop apps once
-the user grants notification access). Devin Desktop posts toasts under the
-AUMID "Exafunction.Windsurf". The NotificationChanged event requires package
-identity, so we poll the action-center list and diff notification IDs instead.
+Fully event-driven, zero polling: a Win32 SetWinEventHook watches
+EVENT_OBJECT_NAMECHANGE on the toast flyout window (class
+"Windows.UI.Core.CoreWindow", owned by ShellExperienceHost.exe — the shell
+renames it "New notification" for every toast it shows). On each hit the
+flyout's own UI Automation tree yields the toast text: first text element is
+the app name, the rest are title/body. Only Devin toasts are forwarded.
+
+(The WinRT UserNotificationListener event API needs package identity, and
+reading toast text through winsdk's NotificationBinding crashes on some
+bindings — UIA on the flyout avoids both problems.)
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes as wt
+import queue
 import threading
 import time
 
-POLL_SECS = 2.5
-_DEVIN_AUMIDS = ("exafunction.windsurf", "devin")
+EVENT_OBJECT_NAMECHANGE = 0x800C
+WINEVENT_OUTOFCONTEXT = 0x0000
 
 
-def _match(aumid: str, name: str) -> bool:
-    s = (aumid + " " + name).lower()
-    return any(k in s for k in _DEVIN_AUMIDS)
-
-
-def _extract_text(notif) -> str:
-    """Pull the visible text out of a UserNotification's toast binding."""
-    try:
-        v = notif.notification.visual
-        parts = []
-        for i in range(v.bindings.size):
-            b = v.bindings.get_at(i)
-            els = b.get_text_elements()
-            for j in range(els.size):
-                parts.append(els.get_at(j).text)
-        return "\n".join(p for p in parts if p)
-    except Exception:
+def _window_proc_name(hwnd) -> str:
+    u32 = ctypes.windll.user32
+    pid = wt.DWORD(0)
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+    if not h:
         return ""
+    buf = ctypes.create_unicode_buffer(260)
+    n = wt.DWORD(260)
+    ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+        h, 0, buf, ctypes.byref(n))
+    ctypes.windll.kernel32.CloseHandle(h)
+    return buf.value.rsplit(chr(92), 1)[-1] if ok else ""
+
+
+def _is_toast_flyout(hwnd) -> bool:
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+    if buf.value != "Windows.UI.Core.CoreWindow":
+        return False
+    return _window_proc_name(hwnd).lower() == "shellexperiencehost.exe"
+
+
+def _flyout_texts(hwnd) -> list[str]:
+    """Read every text element in the toast flyout's UIA tree."""
+    import uiautomation as auto
+    texts = []
+
+    def walk(c, depth=0):
+        if depth > 12:
+            return
+        try:
+            if c.ControlTypeName == "TextControl" and c.Name:
+                texts.append(c.Name)
+        except Exception:
+            pass
+        try:
+            kids = c.GetChildren()
+        except Exception:
+            kids = []
+        for ch in kids:
+            walk(ch, depth + 1)
+
+    walk(auto.ControlFromHandle(hwnd))
+    # strip private-use icon glyphs (dismiss/more buttons)
+    return [t for t in texts
+            if not all(0xE000 <= ord(ch) <= 0xF8FF for ch in t)]
 
 
 def start_listener(on_notify, log):
-    """Run the WinRT poll loop in a daemon thread.
+    """Run the toast watcher in a daemon thread.
 
-    on_notify(title: str, body: str) is called from a worker thread.
-    Silently returns if winsdk is unavailable or access is denied.
+    on_notify(title: str, body: str) is called from that worker thread.
+    Silently returns if uiautomation is unavailable.
     """
     try:
-        import asyncio
-        from winsdk.windows.ui.notifications import NotificationKinds
-        from winsdk.windows.ui.notifications.management import (
-            UserNotificationListener)
+        import uiautomation as auto  # noqa: F401  (checked early)
     except Exception as e:
-        log(f"notify: winsdk unavailable: {e!r}")
+        log(f"notify: uiautomation unavailable: {e!r}")
         return
+
+    u32 = ctypes.windll.user32
+    WINEVENTPROC = ctypes.WINFUNCTYPE(
+        None, wt.HANDLE, wt.DWORD, wt.HWND, ctypes.c_long, ctypes.c_long,
+        wt.DWORD, wt.DWORD)
+
+    flyouts: queue.Queue = queue.Queue()
+
+    def _hook_cb(hook, event, hwnd, id_obj, id_child, tid, ms):
+        if hwnd and _is_toast_flyout(hwnd):
+            flyouts.put(hwnd)
+
+    hook_proc = WINEVENTPROC(_hook_cb)  # keep a ref alive
 
     def run():
         try:
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            asyncio.get_event_loop().run_until_complete(_main())
+            with auto.UIAutomationInitializerInThread():
+                hook = u32.SetWinEventHook(
+                    EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                    0, hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
+                if not hook:
+                    log("notify: SetWinEventHook failed")
+                    return
+                log("notify: watching toast flyout for Devin notifications")
+
+                last = {"t": 0.0, "text": ""}
+                msg = wt.MSG()
+                # NOTE: out-of-context WinEvent callbacks are only delivered
+                # while the thread pumps PeekMessage — GetMessage never wakes
+                # for them. This is just a cheap message dispatcher; the only
+                # work happens when a toast actually appears.
+                while True:
+                    while u32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, 1):
+                        u32.TranslateMessage(ctypes.byref(msg))
+                        u32.DispatchMessageW(ctypes.byref(msg))
+                    try:
+                        hwnd = flyouts.get_nowait()
+                    except queue.Empty:
+                        hwnd = 0
+                    if hwnd:
+                        # let the flyout's UIA tree populate
+                        time.sleep(0.7)
+                        try:
+                            texts = _flyout_texts(hwnd)
+                        except Exception as e:
+                            log(f"notify: flyout read err {e!r}")
+                            texts = []
+                        if texts and texts[0].lower() == "devin":
+                            body = " — ".join(texts[1:]).strip()
+                            if body:
+                                now = time.time()
+                                if body != last["text"] or \
+                                        now - last["t"] > 6:
+                                    last["t"], last["text"] = now, body
+                                    log(f"notify: {body[:80]!r}")
+                                    title = "Devin"
+                                    head, sep, rest = body.partition(" — ")
+                                    if sep and len(head) <= 40:
+                                        title, body = head.strip(), \
+                                            rest.strip()
+                                    on_notify(title, body)
+                    time.sleep(0.1)
         except Exception as e:
             log(f"notify loop died: {e!r}")
-
-    async def _main():
-        listener = UserNotificationListener.current
-        try:
-            acc = await listener.request_access_async()
-        except Exception as e:
-            log(f"notify: access request failed: {e!r}")
-            return
-        if int(acc) != 1:  # UserNotificationListenerAccessStatus.ALLOWED
-            log(f"notify: access denied ({acc})")
-            return
-
-        # snapshot existing toasts so old ones don't re-fire us
-        try:
-            cur = await listener.get_notifications_async(NotificationKinds.TOAST)
-            known = {cur.get_at(i).id for i in range(cur.size)}
-        except Exception:
-            known = set()
-
-        last = {"t": 0.0, "text": ""}
-        log("notify: polling action center for Devin toasts")
-
-        while True:
-            await asyncio.sleep(POLL_SECS)
-            try:
-                cur = await listener.get_notifications_async(
-                    NotificationKinds.TOAST)
-                ids = set()
-                for i in range(cur.size):
-                    n = cur.get_at(i)
-                    ids.add(n.id)
-                    if n.id in known:
-                        continue
-                    aumid = n.app_info.app_user_model_id
-                    name = n.app_info.display_info.display_name
-                    if not _match(aumid, name):
-                        continue
-                    text = _extract_text(n)
-                    if not text:
-                        continue
-                    # debounce identical rapid-fire toasts
-                    now = time.time()
-                    if text == last["text"] and now - last["t"] < 6:
-                        continue
-                    last["t"], last["text"] = now, text
-                    # "Session name: message..." -> title + body
-                    title = "Devin"
-                    body = text.strip()
-                    head, sep, rest = body.partition("：")
-                    if not sep:
-                        head, sep, rest = body.partition(": ")
-                    if sep and len(head) <= 30:
-                        title, body = head.strip(), rest.strip()
-                    log(f"notify: [{name}] {body[:80]!r}")
-                    on_notify(title, body)
-                known = ids  # forget toasts removed from action center
-            except Exception as e:
-                log(f"notify poll err: {e!r}")
 
     threading.Thread(target=run, daemon=True, name="notif-listener").start()
