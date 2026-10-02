@@ -143,10 +143,11 @@ from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QRect,
                             QRectF, Qt, QTimer, QPropertyAnimation, Signal,
                             Property)
 from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication,
-                           QLinearGradient, QPainter, QPen, QRadialGradient)
+                           QIntValidator, QLinearGradient, QPainter, QPen,
+                           QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QLayout, QPushButton, QSizePolicy, QVBoxLayout,
-                               QWidget)
+                               QLayout, QLineEdit, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
 
 # --- the orb ------------------------------------------------------------------
@@ -462,47 +463,44 @@ class OrbWindow(QWidget):
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(0, 0), fr, fr)
 
-        # ticks: 12 hour marks
-        p.save()
-        for i in range(12):
-            major = i % 3 == 0
-            pen = QPen(col["tick"], 1.9 if major else 1.1)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
+        # Cognition-minimal face: only the four cardinal ticks
+        pen = QPen(col["tick"], 1.2)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        for i in (0, 3, 6, 9):
             a = math.radians(i * 30)
-            r2 = fr - 2.2
-            r1 = r2 - (3.6 if major else 2.2)
+            r2 = fr - 2.4
+            r1 = r2 - 3.0
             p.drawLine(QPointF(r1 * math.sin(a), -r1 * math.cos(a)),
                        QPointF(r2 * math.sin(a), -r2 * math.cos(a)))
-        p.restore()
 
         now = time.localtime()
         sec = time.time() % 60
         minute = now.tm_min + sec / 60
         hour = (now.tm_hour % 12) + minute / 60
 
-        # hour hand
-        pen = QPen(col["ink"], 2.8, Qt.SolidLine, Qt.RoundCap)
+        # hour hand — short, confident
+        pen = QPen(col["ink"], 2.4, Qt.SolidLine, Qt.RoundCap)
         p.setPen(pen)
         a = math.radians(hour * 30)
-        p.drawLine(QPointF(0, 0), QPointF(9.5 * math.sin(a), -9.5 * math.cos(a)))
-        # minute hand
-        pen = QPen(col["ink"], 2.0, Qt.SolidLine, Qt.RoundCap)
+        p.drawLine(QPointF(0, 0), QPointF(8.5 * math.sin(a), -8.5 * math.cos(a)))
+        # minute hand — thin and long
+        pen = QPen(col["ink"], 1.6, Qt.SolidLine, Qt.RoundCap)
         p.setPen(pen)
         a = math.radians(minute * 6)
-        p.drawLine(QPointF(0, 0), QPointF(13.5 * math.sin(a), -13.5 * math.cos(a)))
-        # second hand (smooth sweep) + tail
-        pen = QPen(col["accent"], 1.1, Qt.SolidLine, Qt.RoundCap)
+        p.drawLine(QPointF(0, 0), QPointF(13.0 * math.sin(a), -13.0 * math.cos(a)))
+        # second hand — hairline sweep, barely-there tail
+        pen = QPen(col["accent"], 0.9, Qt.SolidLine, Qt.RoundCap)
         p.setPen(pen)
         a = math.radians(sec * 6)
-        p.drawLine(QPointF(-4.5 * math.sin(a), 4.5 * math.cos(a)),
-                   QPointF(15.5 * math.sin(a), -15.5 * math.cos(a)))
-        # hub
+        p.drawLine(QPointF(-3.5 * math.sin(a), 3.5 * math.cos(a)),
+                   QPointF(15.0 * math.sin(a), -15.0 * math.cos(a)))
+        # hub — small pin
         p.setPen(Qt.NoPen)
         p.setBrush(col["accent"])
-        p.drawEllipse(QPointF(0, 0), 2.3, 2.3)
+        p.drawEllipse(QPointF(0, 0), 1.8, 1.8)
         p.setBrush(col["ink"])
-        p.drawEllipse(QPointF(0, 0), 0.9, 0.9)
+        p.drawEllipse(QPointF(0, 0), 0.7, 0.7)
 
         p.restore()
 
@@ -572,6 +570,8 @@ I18N = {
                quit="退出悬浮球", on="开", off="关",
                auto="自动", dailyS="每日", weeklyS="每周",
                follow="跟随OU", light="浅", dark="深",
+               custom="自定义", customLbl="自定义间隔", ok="确定",
+               customPh="分钟",
                errAuth="未登录 Devin — 请先登录 Devin Desktop",
                errNet="获取数据失败，点 ⟳ 重试",
                periodFmt=lambda a, b: f"计费周期 {a} → {b}"),
@@ -584,6 +584,8 @@ I18N = {
                quit="Quit orb", on="On", off="Off",
                auto="Auto", dailyS="Daily", weeklyS="Weekly",
                follow="OU", light="Light", dark="Dark",
+               custom="Custom", customLbl="Custom interval", ok="OK",
+               customPh="min",
                errAuth="Not signed in to Devin — sign in to Devin Desktop first",
                errNet="Failed to fetch. Press ⟳ to retry",
                periodFmt=lambda a, b: f"Billing cycle {a} → {b}"),
@@ -637,6 +639,11 @@ QWidget#setrow {{ border-top:1px solid {border}; }}
 QPushButton#quit {{ margin-top:8px; padding:7px; border-radius:9px;
     border:1px solid {border}; background:{btn}; color:{dim}; font-size:12px; }}
 QPushButton#quit:hover {{ color:#f87171; background:rgba(248,113,113,31); }}
+QLineEdit#edit {{ background:{btn}; border:1px solid {border}; border-radius:7px;
+    padding:4px 8px; color:{text}; font-size:12px; }}
+QLineEdit#edit:focus {{ border:1px solid {dim}; }}
+QPushButton#okbtn {{ background:{btnhov}; color:{text}; border:none;
+    border-radius:7px; padding:5px 12px; font-size:11px; font-weight:600; }}
 """
 
 
@@ -868,7 +875,8 @@ class PanelWindow(QWidget):
         sl.setSpacing(0)
         self._rows = []
 
-        def seg_row(text_key, setting_key, options, first=False):
+        def seg_row(text_key, setting_key, options, first=False,
+                    handler=None):
             row = QWidget(objectName="" if first else "setrow")
             h = QHBoxLayout(row)
             h.setContentsMargins(2, 7, 2, 7)
@@ -876,7 +884,8 @@ class PanelWindow(QWidget):
             lbl.setStyleSheet("font-size:12px")
             seg = SegControl(options)
             seg.valueChanged.connect(
-                lambda v, k=setting_key: apply_setting(k, v))
+                handler if handler else
+                (lambda v, k=setting_key: apply_setting(k, v)))
             h.addWidget(lbl)
             h.addStretch(1)
             h.addWidget(seg)
@@ -896,7 +905,29 @@ class PanelWindow(QWidget):
                                   ("dark", "dark")])
         self.seg_ref = seg_row("sRefresh", "refresh_secs",
                                [("300", "5m"), ("600", "10m"),
-                                ("3000", "50m")])
+                                ("3000", "50m"), ("custom", "custom")],
+                               handler=self._on_refresh_seg)
+
+        # inline custom-interval editor (minutes), hidden until 自定义 is on
+        self.custom_row = QWidget(objectName="setrow")
+        ch = QHBoxLayout(self.custom_row)
+        ch.setContentsMargins(2, 7, 2, 7)
+        self.custom_lbl = QLabel("", objectName="dim")
+        self.custom_lbl.setStyleSheet("font-size:12px")
+        self.custom_edit = QLineEdit(objectName="edit")
+        self.custom_edit.setFixedWidth(72)
+        self.custom_edit.setValidator(QIntValidator(1, 1440, self))
+        self.custom_ok = QPushButton("", objectName="okbtn")
+        self.custom_ok.setCursor(Qt.PointingHandCursor)
+        self.custom_ok.clicked.connect(self._apply_custom_refresh)
+        self.custom_edit.returnPressed.connect(self._apply_custom_refresh)
+        ch.addWidget(self.custom_lbl)
+        ch.addStretch(1)
+        ch.addWidget(self.custom_edit)
+        ch.addSpacing(4)
+        ch.addWidget(self.custom_ok)
+        self.custom_row.hide()
+        sl.addWidget(self.custom_row)
         self.seg_login = seg_row("sLogin", "start_on_login",
                                  [("true", "on"), ("false", "off")])
         self.seg_devin = seg_row("sDevin", "devin_hook",
@@ -936,6 +967,27 @@ class PanelWindow(QWidget):
         self._tick.start(30000)
 
         self.adjustSize()
+
+    def _on_refresh_seg(self, v):
+        if v == "custom":
+            # toggle the inline editor; the seg button stays lit
+            self.custom_row.setVisible(not self.custom_row.isVisible())
+            if self.custom_row.isVisible():
+                self.custom_edit.setFocus()
+        else:
+            self.custom_row.hide()
+            apply_setting("refresh_secs", v)
+
+    def _apply_custom_refresh(self):
+        try:
+            mins = int(self.custom_edit.text())
+        except ValueError:
+            return
+        mins = max(1, min(1440, mins))
+        S.cfg = config.update(refresh_secs=mins * 60)
+        self.custom_row.hide()
+        push_orb()
+        push_panel()
 
     # -- theme / state -----------------------------------------------------------
 
@@ -982,9 +1034,13 @@ class PanelWindow(QWidget):
         self.seg_src.set_value(st.get("ring_source", "auto"))
         self.seg_theme.set_value(st.get("theme", "follow"))
         rf = st.get("refresh_secs", 300)
-        if str(rf) not in self.seg_ref.btns:
-            rf = min((300, 600, 3000), key=lambda x: abs(x - rf))
-        self.seg_ref.set_value(str(rf))
+        is_custom = str(rf) not in ("300", "600", "3000")
+        self.seg_ref.set_value("custom" if is_custom else str(rf))
+        self.custom_lbl.setText(i["customLbl"])
+        self.custom_edit.setPlaceholderText(i["customPh"])
+        self.custom_ok.setText(i["ok"])
+        if is_custom and not self.custom_edit.hasFocus():
+            self.custom_edit.setText(str(max(1, round(rf / 60))))
         self.seg_login.set_value("true" if st.get("start_on_login") else "false")
         self.seg_devin.set_value("true" if st.get("devin_hook") else "false")
         # data
