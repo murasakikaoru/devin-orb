@@ -9,7 +9,6 @@ Run:  python app.py      (or pythonw app.py for no console)
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import sys
@@ -140,13 +139,14 @@ def state_payload() -> dict:
 
 # --- Qt imports (deferred so --help-ish failures stay cheap) -------------------
 
-from PySide6.QtCore import (QEasingCurve, QObject, QPointF, QRectF, Qt,
-                            QTimer, QPropertyAnimation, Signal, Slot)
-from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication, QPainter,
-                           QPen, QRadialGradient)
-from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QRect,
+                            QRectF, Qt, QTimer, QPropertyAnimation, Signal,
+                            Property)
+from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication,
+                           QLinearGradient, QPainter, QPen, QRadialGradient)
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
+                               QLayout, QPushButton, QSizePolicy, QVBoxLayout,
+                               QWidget)
 
 
 # --- the orb ------------------------------------------------------------------
@@ -463,151 +463,620 @@ class OrbWindow(QWidget):
         p.end()
 
 
-# --- the panel ---------------------------------------------------------------
+# --- the panel (native Qt widgets — no WebEngine) -----------------------------
 
-PANEL_W, PANEL_H = 360, 500
+PAD = 9                    # transparent margin around the card (shadow room)
+PANEL_W = 372 + 2 * PAD    # total window width
 APP = None
 ORB = None
 PANEL = None
 
+I18N = {
+    "zh": dict(app="Devin", daily="每日配额", weekly="每周配额",
+               balance="额外余额", left="剩余", used="已用",
+               updated="更新于", ago="前",
+               sPin="双击悬浮球 → 面板置顶", sRing="配额环显示",
+               sSrc="配额环数据源", sTheme="主题", sRefresh="自动刷新",
+               sLogin="开机自启", sDevin="随 Devin 启动",
+               quit="退出悬浮球", on="开", off="关",
+               auto="自动", dailyS="每日", weeklyS="每周",
+               follow="跟随OU", light="浅", dark="深",
+               errAuth="未登录 Devin — 请先登录 Devin Desktop",
+               errNet="获取数据失败，点 ⟳ 重试",
+               periodFmt=lambda a, b: f"计费周期 {a} → {b}"),
+    "en": dict(app="Devin", daily="Daily quota", weekly="Weekly quota",
+               balance="Extra balance", left="left", used="used",
+               updated="Updated", ago="ago",
+               sPin="Double-click orb pins panel", sRing="Ring shows",
+               sSrc="Ring source", sTheme="Theme", sRefresh="Auto refresh",
+               sLogin="Start on login", sDevin="Launch with Devin",
+               quit="Quit orb", on="On", off="Off",
+               auto="Auto", dailyS="Daily", weeklyS="Weekly",
+               follow="OU", light="Light", dark="Dark",
+               errAuth="Not signed in to Devin — sign in to Devin Desktop first",
+               errNet="Failed to fetch. Press ⟳ to retry",
+               periodFmt=lambda a, b: f"Billing cycle {a} → {b}"),
+}
 
-class PanelBridge(QObject):
-    """Object exposed to JS as `bridge` via QWebChannel."""
+# Devin / Cognition monochrome palette
+PAL = {
+    "dark": dict(
+        cardbg="qlineargradient(x1:0,y1:0,x2:1,y2:1, "
+               "stop:0 rgba(28,28,33,238), stop:1 rgba(16,16,19,243))",
+        border="rgba(255,255,255,33)", text="#f2f2f4", dim="#9ba0a8",
+        track=QColor(255, 255, 255, 26), btn="rgba(255,255,255,20)",
+        btnhov="rgba(255,255,255,41)", accent="#fafafa",
+        fill=("#e4e4e7", "#fafafa")),
+    "light": dict(
+        cardbg="qlineargradient(x1:0,y1:0,x2:1,y2:1, "
+               "stop:0 rgba(255,255,255,240), stop:1 rgba(243,245,249,243))",
+        border="rgba(15,23,42,26)", text="#1f2430", dim="#6b7280",
+        track=QColor(32, 36, 46, 26), btn="rgba(32,36,46,18)",
+        btnhov="rgba(32,36,46,36)", accent="#0a0a0a",
+        fill=("#3f3f46", "#0a0a0a")),
+}
 
-    @Slot()
-    def panel_ready(self):
-        push_panel()
+BAR_LEVELS = {
+    "warn": ("#f59e0b", "#fbbf24"),
+    "bad": ("#ef4444", "#f87171"),
+}
 
-    @Slot()
-    def panel_blur(self):
-        if S.panel_pinned:
+CARD_QSS = """
+#card {{ background: {cardbg}; border:1px solid {border}; border-radius:18px; }}
+QLabel {{ color:{text}; background:transparent; font-family:"Segoe UI","Microsoft YaHei"; }}
+QLabel#dim  {{ color:{dim}; font-size:12.5px; }}
+QLabel#tiny {{ color:{dim}; font-size:10.5px; }}
+QLabel#tinyr{{ color:{dim}; font-size:10.5px; }}
+QLabel#title{{ font-size:17px; font-weight:700; }}
+QLabel#badge{{ font-size:10px; font-weight:700; color:{dim}; padding:2px 7px;
+    border-radius:6px; background:{btn}; border:1px solid {border}; }}
+QLabel#qval {{ font-size:12.5px; font-weight:600; }}
+QLabel#amt  {{ font-size:24px; font-weight:800; color:{accent}; }}
+QLabel#err  {{ color:#f87171; font-size:11px; }}
+QPushButton#icon {{ min-width:26px;max-width:26px;min-height:26px;max-height:26px;
+    border-radius:8px; border:none; background:{btn}; color:{dim}; font-size:13px; }}
+QPushButton#icon:hover {{ background:{btnhov}; color:{text}; }}
+QPushButton#icon:checked {{ color:{accent}; background:{btnhov}; }}
+QFrame#balance {{ background:{btn}; border:1px solid {border}; border-radius:12px; }}
+QFrame#segbox {{ background:{trackqss}; border-radius:8px; }}
+QPushButton#seg {{ border:none; background:transparent; color:{dim};
+    font-size:11px; padding:4px 9px; border-radius:6px; }}
+QPushButton#seg:checked {{ background:{btnhov}; color:{text}; font-weight:600; }}
+QWidget#setrow {{ border-top:1px solid {border}; }}
+QPushButton#quit {{ margin-top:8px; padding:7px; border-radius:9px;
+    border:1px solid {border}; background:{btn}; color:{dim}; font-size:12px; }}
+QPushButton#quit:hover {{ color:#f87171; background:rgba(248,113,113,31); }}
+"""
+
+
+def fmt_reset(unix, lang):
+    if not unix:
+        return ""
+    s = max(0, int(unix - time.time()))
+    d, h, m = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    rel = f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m"
+    return f"{rel} 后重置" if lang == "zh" else f"Resets in {rel}"
+
+
+def fmt_updated(ts, lang):
+    if not ts:
+        return ""
+    s = max(0, int(time.time() - ts))
+    rel = f"{s}s" if s < 60 else f"{s // 60}m"
+    i = I18N[lang]
+    return f"{i['updated']} {rel} {i['ago']}" if lang == "zh" \
+        else f"{i['updated']} {rel} {i['ago']}"
+
+
+def fmt_date(s):
+    return (s or "")[:10] or "—"
+
+
+class QuotaBar(QWidget):
+    """Animated rounded progress bar; fills toward remaining/used percent."""
+
+    def __init__(self):
+        super().__init__()
+        self._pct = 0.0
+        self.level = "ok"
+        self.pal = PAL["dark"]
+        self.setFixedHeight(10)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._anim = QPropertyAnimation(self, b"pct", self)
+        self._anim.setDuration(650)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def _get(self):
+        return self._pct
+
+    def _set(self, v):
+        self._pct = v
+        self.update()
+
+    pct = Property(float, _get, _set)
+
+    def show_pct(self, v, level):
+        self.level = level
+        self._anim.stop()
+        self._anim.setStartValue(self._pct)
+        self._anim.setEndValue(float(v))
+        self._anim.start()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        h = self.height()
+        r = QRectF(0, 0.5, self.width(), h - 1)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.pal["track"])
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        if self._pct > 0:
+            w = max(r.height(), r.width() * self._pct / 100.0)
+            fr = QRectF(0, 0.5, w, r.height())
+            c1, c2 = BAR_LEVELS.get(self.level, self.pal["fill"])
+            g = QLinearGradient(fr.topLeft(), fr.topRight())
+            g.setColorAt(0, QColor(c1))
+            g.setColorAt(1, QColor(c2))
+            p.setBrush(g)
+            p.drawRoundedRect(fr, fr.height() / 2, fr.height() / 2)
+        p.end()
+
+
+class SegControl(QFrame):
+    """Segmented switch; emits the chosen value string."""
+
+    valueChanged = Signal(str)
+
+    def __init__(self, options):
+        super().__init__(objectName="segbox")
+        self.opts = options               # [(value, i18n-key)]
+        self.btns = {}
+        h = QHBoxLayout(self)
+        h.setContentsMargins(2, 2, 2, 2)
+        h.setSpacing(2)
+        for v, _k in options:
+            b = QPushButton("", objectName="seg")
+            b.setCheckable(True)
+            b.setAutoExclusive(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, vv=v: self.valueChanged.emit(vv))
+            self.btns[v] = b
+            h.addWidget(b)
+
+    def set_labels(self, lang):
+        for v, k in self.opts:
+            self.btns[v].setText(I18N[lang].get(k, k))
+
+    def set_value(self, v):
+        b = self.btns.get(str(v))
+        if b:
+            b.setChecked(True)
+
+
+class QuotaRow(QWidget):
+    def __init__(self):
+        super().__init__()
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(5)
+        top = QHBoxLayout()
+        self.name = QLabel("", objectName="dim")
+        self.val = QLabel("", objectName="qval")
+        top.addWidget(self.name)
+        top.addStretch(1)
+        top.addWidget(self.val)
+        self.bar = QuotaBar()
+        self.reset = QLabel("", objectName="tinyr")
+        self.reset.setAlignment(Qt.AlignRight)
+        v.addLayout(top)
+        v.addWidget(self.bar)
+        v.addWidget(self.reset)
+
+    def show_data(self, left, reset_unix, used_mode, lang):
+        if left is None:
+            self.hide()
             return
-        if time.time() - S.panel_shown_at < 0.6:
-            return
-        hide_panel(from_blur=True)
+        self.show()
+        shown = 100 - left if used_mode else left
+        shown = max(0.0, min(100.0, shown))
+        i = I18N[lang]
+        self.val.setText(f"{shown:.0f}% {i['used' if used_mode else 'left']}")
+        lvl = "ok" if shown >= 50 else "warn" if shown >= 20 else "bad"
+        self.bar.show_pct(shown, lvl)
+        self.reset.setText(fmt_reset(reset_unix, lang))
 
-    @Slot()
-    def toggle_pin(self):
-        S.panel_pinned = not S.panel_pinned
-        config.update(panel_pinned=S.panel_pinned)
-        push_panel()
 
-    @Slot()
-    def refresh_now(self):
-        threading.Thread(target=lambda: (fetch(force=True), push_orb(), push_panel()),
-                         daemon=True).start()
-
-    @Slot(str)
-    def set_language(self, lang):
-        config.update(language=lang)
-        push_panel()
-
-    @Slot(str, str)
-    def set_setting(self, key, value):
-        if key not in ("dblclick_pin", "ring_mode", "ring_source", "theme",
-                       "start_on_login", "devin_hook", "refresh_secs"):
-            return
-        v = value
-        if value in ("true", "false"):
-            v = value == "true"
-        if key == "refresh_secs":
-            v = int(value)
-        S.cfg = config.update(**{key: v})
-        if key == "start_on_login":
-            config.set_autostart(bool(v), os.path.join(BASE_DIR, "app.py"))
-        if key == "devin_hook":
-            script = os.path.join(BASE_DIR, "app.py")
-            ok = (config.install_devin_hook(script) if v
-                  else config.remove_devin_hook())
-            log(f"devin_hook {'installed' if v else 'removed'} ok={ok}")
-        push_orb()
-        push_panel()
-
-    @Slot()
-    def quit_app(self):
-        QApplication.quit()
+class IconBtn(QPushButton):
+    def __init__(self, text):
+        super().__init__(text, objectName="icon")
+        self.setCursor(Qt.PointingHandCursor)
 
 
 class PanelWindow(QWidget):
+    """Native glass card panel. Height animates when the settings drawer opens,
+    so it never clips or overflows the screen."""
+
     def __init__(self):
         super().__init__(None,
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(PANEL_W, PANEL_H)
 
-        self.web = QWebEngineView(self)
-        self.web.setContextMenuPolicy(Qt.NoContextMenu)
-        self.web.setAttribute(Qt.WA_TranslucentBackground)
-        self.web.page().setBackgroundColor(Qt.transparent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.web)
+        self._theme_name = ""
+        self._state = {}
+        self._set_open = False
+        self._closing = False
+        self._side = 1.0                 # which side the orb is on
 
-        self.bridge = PanelBridge(self)
-        ch = QWebChannel(self.web.page())
-        ch.registerObject("bridge", self.bridge)
-        self.web.page().setWebChannel(ch)
-        self.web.load(f"file:///{os.path.join(BASE_DIR, 'web', 'panel.html').replace(os.sep, '/')}")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(PAD, PAD, PAD, PAD)
+        outer.setSpacing(0)
+        # window always hugs the card's real content height — the settings
+        # drawer grows/shrinks the whole window, never clips off-screen.
+        outer.setSizeConstraint(QLayout.SetFixedSize)
 
+        self.card = QFrame(objectName="card")
+        self.card.setFixedWidth(PANEL_W - 2 * PAD)
+        outer.addWidget(self.card)
+        lay = QVBoxLayout(self.card)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(0)
+
+        # header
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.lbl_title = QLabel("Devin", objectName="title")
+        self.badge = QLabel("", objectName="badge")
+        self.badge.hide()
+        head.addWidget(self.lbl_title)
+        head.addWidget(self.badge)
+        head.addStretch(1)
+        self.b_lang = IconBtn("文")
+        self.b_pin = IconBtn("📌")
+        self.b_pin.setCheckable(True)
+        self.b_ref = IconBtn("⟳")
+        self.b_gear = IconBtn("⚙")
+        self.b_gear.setCheckable(True)
+        for b in (self.b_lang, self.b_pin, self.b_ref, self.b_gear):
+            head.addWidget(b)
+        lay.addLayout(head)
+        lay.addSpacing(8)
+
+        self.q_daily = QuotaRow()
+        self.q_weekly = QuotaRow()
+        lay.addWidget(self.q_daily)
+        lay.addSpacing(10)
+        lay.addWidget(self.q_weekly)
+        lay.addSpacing(8)
+
+        bal = QFrame(objectName="balance")
+        bh = QHBoxLayout(bal)
+        bh.setContentsMargins(14, 10, 14, 10)
+        self.lbl_bal = QLabel("", objectName="dim")
+        self.amt = QLabel("—", objectName="amt")
+        bh.addWidget(self.lbl_bal)
+        bh.addStretch(1)
+        bh.addWidget(self.amt)
+        lay.addWidget(bal)
+        lay.addSpacing(4)
+
+        meta = QHBoxLayout()
+        self.period = QLabel("", objectName="tiny")
+        self.updated = QLabel("", objectName="tiny")
+        meta.addWidget(self.period)
+        meta.addStretch(1)
+        meta.addWidget(self.updated)
+        lay.addLayout(meta)
+        self.err = QLabel("", objectName="err")
+        self.err.hide()
+        lay.addWidget(self.err)
+
+        # settings drawer
+        self.settings = QWidget()
+        sl = QVBoxLayout(self.settings)
+        sl.setContentsMargins(2, 8, 2, 0)
+        sl.setSpacing(0)
+        self._rows = []
+
+        def seg_row(text_key, setting_key, options, first=False):
+            row = QWidget(objectName="" if first else "setrow")
+            h = QHBoxLayout(row)
+            h.setContentsMargins(2, 7, 2, 7)
+            lbl = QLabel("", objectName="dim")
+            lbl.setStyleSheet("font-size:12px")
+            seg = SegControl(options)
+            seg.valueChanged.connect(
+                lambda v, k=setting_key: apply_setting(k, v))
+            h.addWidget(lbl)
+            h.addStretch(1)
+            h.addWidget(seg)
+            sl.addWidget(row)
+            self._rows.append((text_key, lbl, seg))
+            return seg
+
+        self.seg_dbl = seg_row("sPin", "dblclick_pin",
+                               [("true", "on"), ("false", "off")], first=True)
+        self.seg_ring = seg_row("sRing", "ring_mode",
+                                [("left", "left"), ("used", "used")])
+        self.seg_src = seg_row("sSrc", "ring_source",
+                               [("auto", "auto"), ("daily", "dailyS"),
+                                ("weekly", "weeklyS")])
+        self.seg_theme = seg_row("sTheme", "theme",
+                                 [("follow", "follow"), ("light", "light"),
+                                  ("dark", "dark")])
+        self.seg_ref = seg_row("sRefresh", "refresh_secs",
+                               [("300", "5m"), ("600", "10m"),
+                                ("3000", "50m")])
+        self.seg_login = seg_row("sLogin", "start_on_login",
+                                 [("true", "on"), ("false", "off")])
+        self.seg_devin = seg_row("sDevin", "devin_hook",
+                                 [("true", "on"), ("false", "off")])
+
+        self.b_quit = QPushButton("", objectName="quit")
+        self.b_quit.setCursor(Qt.PointingHandCursor)
+        sl.addWidget(self.b_quit)
+        self.settings.setVisible(False)   # collapsed: contributes zero height
+        lay.addWidget(self.settings)
+
+        # signals
+        self.b_lang.clicked.connect(
+            lambda: apply_setting("language",
+                                  "en" if S.cfg.get("language") == "zh" else "zh"))
+        self.b_pin.clicked.connect(self._on_pin)
+        self.b_ref.clicked.connect(
+            lambda: threading.Thread(
+                target=lambda: (fetch(force=True), BUS.poke.emit()),
+                daemon=True).start())
+        self.b_gear.clicked.connect(self.toggle_settings)
+        self.b_quit.clicked.connect(QApplication.quit)
+
+        # animations
+        self._anim_pop = QPropertyAnimation(self, b"pos", self)
+        self._anim_pop.finished.connect(self._on_pop_finished)
+        self._anim_move = QPropertyAnimation(self, b"pos", self)
+        self._anim_set = QPropertyAnimation(self.settings, b"maximumHeight", self)
+        self._anim_set.finished.connect(self._on_set_finished)
         self._fade = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade.setDuration(140)
         self._fade.setEasingCurve(QEasingCurve.OutCubic)
 
+        # countdown label refresh
+        self._tick = QTimer(self)
+        self._tick.timeout.connect(
+            lambda: self.apply_state(self._state) if self.isVisible() else None)
+        self._tick.start(30000)
+
+        self.adjustSize()
+
+    # -- theme / state -----------------------------------------------------------
+
+    def apply_theme(self):
+        p = PAL[self._theme_name]
+        qss = CARD_QSS.format(
+            cardbg=p["cardbg"], border=p["border"], text=p["text"],
+            dim=p["dim"], btn=p["btn"], btnhov=p["btnhov"],
+            accent=p["accent"],
+            trackqss=f"rgba({p['track'].red()},{p['track'].green()},"
+                     f"{p['track'].blue()},{p['track'].alpha()})")
+        self.card.setStyleSheet(qss)
+        self.q_daily.bar.pal = p
+        self.q_weekly.bar.pal = p
+        self.update()
+
+    def apply_state(self, s):
+        if not s:
+            return
+        self._state = s
+        lang = s.get("lang", "zh")
+        i = I18N[lang]
+        if theme() != self._theme_name:
+            self._theme_name = theme()
+            self.apply_theme()
+        self.b_pin.setChecked(bool(s.get("pinned")))
+        plan = s.get("plan") or ""
+        self.badge.setText(plan)
+        self.badge.setVisible(bool(plan))
+        # labels / i18n
+        self.lbl_title.setText(i["app"])
+        self.q_daily.name.setText(i["daily"])
+        self.q_weekly.name.setText(i["weekly"])
+        self.lbl_bal.setText(i["balance"])
+        self.b_quit.setText(i["quit"])
+        for tk, lbl, seg in self._rows:
+            lbl.setText(i[tk])
+            seg.set_labels(lang)
+        # settings values
+        st = s.get("settings", {})
+        self.seg_dbl.set_value("true" if st.get("dblclick_pin") else "false")
+        rm = st.get("ring_mode", "follow")
+        self.seg_ring.set_value(rm if rm in ("left", "used") else "left")
+        self.seg_src.set_value(st.get("ring_source", "auto"))
+        self.seg_theme.set_value(st.get("theme", "follow"))
+        self.seg_ref.set_value(str(st.get("refresh_secs", 300)))
+        self.seg_login.set_value("true" if st.get("start_on_login") else "false")
+        self.seg_devin.set_value("true" if st.get("devin_hook") else "false")
+        # data
+        err = s.get("error")
+        self.err.setVisible(bool(err))
+        if err:
+            self.err.setText(i["errAuth"] if err == "auth" else i["errNet"])
+        used = s.get("ringShown") == "used"
+        self.q_daily.show_data(s.get("daily_left"), s.get("daily_reset"), used, lang)
+        self.q_weekly.show_data(s.get("weekly_left"), s.get("weekly_reset"), used, lang)
+        ov = s.get("overage_usd")
+        self.amt.setText("—" if ov is None else f"${ov:.2f}")
+        self.period.setText(i["periodFmt"](fmt_date(s.get("period_start")),
+                                           fmt_date(s.get("period_end"))))
+        self.updated.setText(fmt_updated(s.get("fetched_at"), lang))
+
+    def _settings_height(self):
+        """Natural height of the settings drawer contents."""
+        h = self.settings.layout().totalSizeHint().height()
+        return h if h > 0 else 250
+
+    # -- interactions ------------------------------------------------------------
+
+    def _on_pin(self):
+        S.panel_pinned = self.b_pin.isChecked()
+        config.update(panel_pinned=S.panel_pinned)
+
+    def toggle_settings(self):
+        self.set_settings_open(not self._set_open)
+
+    def set_settings_open(self, open_, animate=True):
+        if open_ == self._set_open:
+            return
+        self._set_open = open_
+        self.b_gear.setChecked(open_)
+        if self._anim_pop.state() == QPropertyAnimation.Running:
+            animate = False
+        h_set = self._settings_height()
+        g = self.geometry()
+        scr = QGuiApplication.screenAt(g.center()) \
+            or QGuiApplication.primaryScreen()
+        a = scr.availableGeometry()
+        if open_:
+            # grow downward; shift up if the bottom would leave the screen
+            ny = g.y()
+            if g.y() + g.height() + h_set > a.bottom() - 8:
+                ny = max(a.top() + 8,
+                         a.bottom() - 8 - g.height() - h_set)
+            self.settings.setMaximumHeight(0)
+            self.settings.setVisible(True)
+            if animate and self.isVisible():
+                self._anim_set.stop()
+                self._anim_set.setDuration(300)
+                self._anim_set.setEasingCurve(QEasingCurve.InOutCubic)
+                self._anim_set.setStartValue(0)
+                self._anim_set.setEndValue(h_set)
+                self._anim_set.start()
+                if ny != g.y():
+                    self._anim_move.stop()
+                    self._anim_move.setDuration(300)
+                    self._anim_move.setEasingCurve(QEasingCurve.InOutCubic)
+                    self._anim_move.setStartValue(g.topLeft())
+                    self._anim_move.setEndValue(QPoint(g.x(), ny))
+                    self._anim_move.start()
+            else:
+                self.settings.setMaximumHeight(16777215)
+                if ny != g.y():
+                    self.move(g.x(), ny)
+        else:
+            if animate and self.isVisible():
+                self._anim_set.stop()
+                self._anim_set.setDuration(260)
+                self._anim_set.setEasingCurve(QEasingCurve.InOutCubic)
+                self._anim_set.setStartValue(self.settings.maximumHeight())
+                self._anim_set.setEndValue(0)
+                self._anim_set.start()
+            else:
+                self.settings.setVisible(False)
+
+    def _on_set_finished(self):
+        if not self._set_open and self.settings.maximumHeight() == 0:
+            self.settings.setVisible(False)
+
+    def pop_show(self, target: QRect, side: float):
+        """Slide in from the orb's direction + fade, with a soft overshoot."""
+        self._side = side
+        self._closing = False
+        self._anim_move.stop()
+        self.resize(target.size())
+        start = QPoint(target.x() + int(30 * (1 if side >= 1.0 else -1)),
+                       target.y() + 10)
+        self.move(start)
+        self.setWindowOpacity(0.0)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._anim_pop.stop()
+        self._anim_pop.setDuration(380)
+        self._anim_pop.setEasingCurve(QEasingCurve.OutBack)
+        self._anim_pop.setStartValue(start)
+        self._anim_pop.setEndValue(target.topLeft())
+        self._anim_pop.start()
+        self._fade.stop()
+        self._fade.setDuration(150)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+
+    def pop_hide(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._anim_move.stop()
+        self._anim_set.stop()
+        g = self.geometry()
+        end = QPoint(g.x() + int(24 * (1 if self._side >= 1.0 else -1)),
+                     g.y() + 6)
+        self._anim_pop.stop()
+        self._anim_pop.setDuration(150)
+        self._anim_pop.setEasingCurve(QEasingCurve.InCubic)
+        self._anim_pop.setStartValue(g.topLeft())
+        self._anim_pop.setEndValue(end)
+        self._anim_pop.start()
+        self._fade.stop()
+        self._fade.setDuration(140)
+        self._fade.setStartValue(1.0)
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+        QTimer.singleShot(210, self._finish_hide)
+
+    def _on_pop_finished(self):
+        if self._closing:
+            self._finish_hide()
+
+    def _finish_hide(self):
+        if not self._closing:
+            return
+        self._closing = False
+        self.hide()
+        self.setWindowOpacity(1.0)
+
+    # -- window events -------------------------------------------------------------
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            S.panel_pinned = False
+            config.update(panel_pinned=False)
+            hide_panel()
+            return
+        super().keyPressEvent(e)
+
     def event(self, e):
-        # real deactivate -> close (equivalent of the old blur-hide)
         if e.type() == e.Type.WindowDeactivate and self.isVisible():
             if not S.panel_pinned and time.time() - S.panel_shown_at > 0.6:
                 hide_panel(from_blur=True)
         return super().event(e)
 
 
-def panel_anchor_position() -> tuple[int, int, str]:
-    scr = QGuiApplication.primaryScreen().availableGeometry()
-    sw, sh = scr.width(), scr.height()
-    ox, oy = ORB.x(), ORB.y()
-    cx, cy = ox + ORB_WIN / 2, oy + ORB_WIN / 2
+def panel_anchor_position() -> tuple:
+    """Panel x,y anchored beside the orb; returns (px, py, side)."""
+    oc = ORB.geometry().center()
+    scr = QGuiApplication.screenAt(oc) or QGuiApplication.primaryScreen()
+    a = scr.availableGeometry()
     gap = 10
-    if cx > scr.x() + sw / 2:
-        px = ox - PANEL_W - gap
-        ax = "100%"
+    w, h = PANEL.width(), PANEL.height()
+    if oc.x() > a.center().x():
+        px = ORB.x() - w - gap
+        side = 1.0
     else:
-        px = ox + ORB_WIN + gap
-        ax = "0%"
-    py = cy - PANEL_H / 2
-    frac = 0.5
-    top, bot = scr.y() + 8, scr.y() + sh - 8
-    if py < top:
-        frac = min(0.95, max(0.05, (cy - top) / PANEL_H))
-        py = top
-    elif py + PANEL_H > bot:
-        frac = min(0.95, max(0.05, (cy - (bot - PANEL_H)) / PANEL_H))
-        py = bot - PANEL_H
-    px = max(scr.x() + 8, min(px, scr.x() + sw - PANEL_W - 8))
-    return int(px), int(py), f"{ax} {frac * 100:.0f}%"
+        px = ORB.x() + ORB_WIN + gap
+        side = 0.0
+    py = oc.y() - h / 2
+    py = max(a.top() + 8, min(py, a.bottom() - h - 8))
+    px = max(a.left() + 8, min(px, a.right() - w - 8))
+    return int(px), int(py), side
 
 
-def js_call(expr: str):
-    try:
-        PANEL.web.page().runJavaScript(expr)
-    except Exception as e:
-        log(f"js err: {e!r}")
-
-
-def show_panel(pinned=None):
+def show_panel(pinned=None, open_settings=False):
     if pinned is not None:
         S.panel_pinned = pinned
-    px, py, anchor = panel_anchor_position()
+        config.update(panel_pinned=pinned)
+    px, py, side = panel_anchor_position()
     S.panel_shown_at = time.time()
-    PANEL.move(px, py)
-    PANEL.setWindowOpacity(0.0)
-    PANEL.show()
-    js_call(f"setAnchor({json.dumps(anchor)}); playEnter()")
-    PANEL._fade.stop()
-    PANEL._fade.setStartValue(0.0)
-    PANEL._fade.setEndValue(1.0)
-    PANEL._fade.start()
-    PANEL.activateWindow()
-    PANEL.raise_()
+    PANEL.pop_show(QRect(px, py, PANEL_W, PANEL.height()), side)
+    if open_settings:
+        PANEL.set_settings_open(True, animate=False)
     push_panel()
 
 
@@ -617,12 +1086,7 @@ def hide_panel(animated=True, from_blur=False):
     if from_blur:
         S.last_blur_hide = time.time()
     if animated:
-        js_call("playExit()")
-        PANEL._fade.stop()
-        PANEL._fade.setStartValue(1.0)
-        PANEL._fade.setEndValue(0.0)
-        PANEL._fade.start()
-        QTimer.singleShot(200, PANEL.hide)
+        PANEL.pop_hide()
     else:
         PANEL.hide()
 
@@ -652,9 +1116,28 @@ def on_orb_dblclick():
 
 
 def on_orb_context():
-    show_panel()
-    QTimer.singleShot(60, lambda: js_call(
-        "document.getElementById('settings').classList.add('open')"))
+    show_panel(open_settings=True)
+
+
+def apply_setting(key, value):
+    if key not in ("dblclick_pin", "ring_mode", "ring_source", "theme",
+                   "start_on_login", "devin_hook", "refresh_secs", "language"):
+        return
+    v = value
+    if value in ("true", "false"):
+        v = value == "true"
+    if key == "refresh_secs":
+        v = int(value)
+    S.cfg = config.update(**{key: v})
+    if key == "start_on_login":
+        config.set_autostart(bool(v), os.path.join(BASE_DIR, "app.py"))
+    if key == "devin_hook":
+        script = os.path.join(BASE_DIR, "app.py")
+        ok = (config.install_devin_hook(script) if v
+              else config.remove_devin_hook())
+        log(f"devin_hook {'installed' if v else 'removed'} ok={ok}")
+    push_orb()
+    push_panel()
 
 
 # --- pushes ------------------------------------------------------------------
@@ -667,10 +1150,8 @@ def push_orb():
 
 
 def push_panel():
-    if not PANEL:
-        return
-    js_call(f"setTheme({json.dumps(theme())})")
-    js_call(f"updateState({json.dumps(state_payload())})")
+    if PANEL:
+        PANEL.apply_state(state_payload())
 
 
 # --- background loops ----------------------------------------------------------

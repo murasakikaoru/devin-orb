@@ -149,9 +149,8 @@ def set_autostart(enabled: bool, script_path: str) -> bool:
     try:
         key = winreg.OpenKey(RUN_KEY, None, 0, winreg.KEY_SET_VALUE)
         if enabled:
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            exe = pythonw if os.path.isfile(pythonw) else sys.executable
-            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, f'"{exe}" "{script_path}"')
+            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ,
+                              _launcher(script_path))
         else:
             try:
                 winreg.DeleteValue(key, RUN_VALUE)
@@ -184,11 +183,18 @@ DEVIN_CONFIG = os.path.join(
 _HOOK_MARKER = "devin-orb"
 
 
-def _hook_command(script_path: str) -> str:
+def _launcher(script_path: str) -> str:
+    """The command that launches the app — works both for source and frozen exe."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     exe = pythonw if os.path.isfile(pythonw) else sys.executable
+    return f'"{exe}" "{script_path}"'
+
+
+def _hook_command(script_path: str) -> str:
     # detached start so the hook never blocks the session
-    return f'cmd /c start "" /min "{exe}" "{script_path}"'
+    return f'cmd /c start "" /min {_launcher(script_path)}'
 
 
 def _read_devin_config() -> dict:
