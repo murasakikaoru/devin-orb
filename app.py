@@ -1626,7 +1626,9 @@ def main():
 
     # first run: inject the SessionStart hook so the orb also launches with
     # Devin sessions (removable via the settings toggle).
-    if S.cfg.get("devin_hook", True) and not config.devin_hook_installed():
+    if S.cfg.get("devin_hook", True):
+        # install_devin_hook is idempotent and rewrites the stored command
+        # when the launcher changes (source vs packaged exe)
         log(f"devin_hook install ok={config.install_devin_hook(os.path.join(BASE_DIR, 'app.py'))}")
 
     threading.Thread(target=refresh_loop, daemon=True).start()

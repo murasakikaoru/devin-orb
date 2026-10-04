@@ -193,8 +193,26 @@ def _launcher(script_path: str) -> str:
 
 
 def _hook_command(script_path: str) -> str:
-    # detached start so the hook never blocks the session
-    return f'cmd /c start "" /min {_launcher(script_path)}'
+    # Devin CLI runs command hooks through its own shell (Git Bash on
+    # Windows) where `cmd /c start` gets path-mangled, and inline
+    # Start-Process quoting breaks on paths with spaces ("C:\AI Works").
+    # A generated .ps1 keeps the hook command to a single quoted argument
+    # that works from cmd, bash, or direct exec, and Start-Process detaches
+    # the orb so the hook exits immediately and can't be killed on timeout.
+    launcher = _launcher(script_path)  # '"exe"' or '"exe" "script"'
+    parts = [p.strip('"') for p in launcher.split('"') if p.strip('" ')]
+    exe, arg = parts[0], (parts[1] if len(parts) > 1 else "")
+    ps = f"Start-Process -FilePath '{exe}'"
+    if arg:
+        ps += f" -ArgumentList '\"{arg}\"'"
+    ps1 = os.path.join(os.path.dirname(CONFIG_PATH), "start-orb.ps1")
+    try:
+        with open(ps1, "w", encoding="utf-8") as f:
+            f.write(ps + "\n")
+    except Exception:
+        pass
+    return ('powershell -NoProfile -ExecutionPolicy Bypass '
+            f'-WindowStyle Hidden -File "{ps1}"')
 
 
 def _read_devin_config() -> dict:
@@ -226,15 +244,24 @@ def devin_hook_installed() -> bool:
 
 
 def install_devin_hook(script_path: str) -> bool:
-    """Add a SessionStart command hook that launches the orb (idempotent)."""
-    if devin_hook_installed():
-        return True
+    """Add a SessionStart command hook that launches the orb (idempotent,
+    and refreshes the stored command when the launcher path changes,
+    e.g. source -> packaged exe)."""
+    want = _hook_command(script_path)
     cfg = _read_devin_config()
+    groups = cfg.get("hooks", {}).get("SessionStart", [])
+    for grp in groups:
+        for h in grp.get("hooks", []):
+            if _HOOK_MARKER in str(h.get("command", "")):
+                if h.get("command") != want:
+                    h["command"] = want
+                    return _write_devin_config(cfg)
+                return True
     hooks = cfg.setdefault("hooks", {})
     entries = hooks.setdefault("SessionStart", [])
     entries.append({
         "hooks": [{"type": "command",
-                   "command": _hook_command(script_path), "timeout": 10}]
+                   "command": want, "timeout": 10}]
     })
     return _write_devin_config(cfg)
 
