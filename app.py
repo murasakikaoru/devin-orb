@@ -30,6 +30,13 @@ LOG_PATH = os.path.join(APP_DIR, "orb.log")
 
 def log(msg: str) -> None:
     try:
+        # rotate once the log grows past ~256 KB: keep the tail
+        if os.path.getsize(LOG_PATH) > 256 * 1024:
+            with open(LOG_PATH, "rb") as f:
+                f.seek(-128 * 1024, os.SEEK_END)
+                tail = f.read().split(b"\n", 1)[-1]
+            with open(LOG_PATH, "wb") as f:
+                f.write(tail)
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
@@ -307,10 +314,6 @@ class OrbWindow(QWidget):
         self._arm_idle()            # re-arm the retract timer
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MiddleButton:
-            # hidden test trigger: fake a Devin toast
-            BUS.notify.emit("Devin", "测试通知 —— 会话完成了一个任务。")
-            return
         if e.button() == Qt.LeftButton:
             self._press_t = 1.0
             if self._docked_in:
