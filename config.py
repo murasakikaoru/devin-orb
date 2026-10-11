@@ -195,7 +195,7 @@ def _launcher(script_path: str) -> str:
 def _hook_command(script_path: str) -> str:
     # Devin CLI runs command hooks through its own shell (Git Bash on
     # Windows) where `cmd /c start` gets path-mangled, and inline
-    # Start-Process quoting breaks on paths with spaces ("C:\AI Works").
+    # Start-Process quoting breaks on paths containing spaces.
     # A generated .ps1 keeps the hook command to a single quoted argument
     # that works from cmd, bash, or direct exec, and Start-Process detaches
     # the orb so the hook exits immediately and can't be killed on timeout.
