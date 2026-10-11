@@ -1,60 +1,75 @@
-# Devin Orb
+<p align="center">
+  <img src="icon.png" width="128" alt="Devin Orb">
+</p>
 
-一个常驻屏幕边缘的悬浮球，实时显示你的 **Devin 账户用量**：日配额 / 周配额 / 额外余额 / 计费周期，黑曜石玻璃球内嵌一枚走动的时钟，外圈是配额环。
+<h1 align="center">Devin Orb</h1>
 
-![platform](https://img.shields.io/badge/platform-Windows-blue)
-![python](https://img.shields.io/badge/python-3.10+-blue)
-![license](https://img.shields.io/badge/license-MIT-green)
+<p align="center">
+  A floating orb widget for Windows that shows your Devin usage at a glance.
+</p>
 
-## 预览
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="LICENSE">MIT License</a> ·
+  <a href="README.zh-CN.md">中文文档</a>
+</p>
 
-- **悬浮球**：黑色玻璃球 + 白色时钟指针 + 配额环（绿→琥珀→红按余量变色），呼吸/悬停/涟漪动效
-- **用量面板**：单击悬浮球弹出玻璃卡片，弹簧入场动画
-- **Pin 模式**：双击悬浮球 → 面板钉在最前端，点别处不收起
-- **右键悬浮球**：直接打开设置抽屉
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Windows-blue" alt="platform">
+  <img src="https://img.shields.io/badge/python-3.10+-blue" alt="python">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+</p>
 
-## 数据来源
+An obsidian-glass ball that lives at the edge of your screen, showing **Devin account usage**: daily quota / weekly quota / extra balance / billing period. A live clock sits inside the orb; the outer ring is a quota gauge.
 
-读取 Devin 客户端自己使用的只读接口（`SeatManagementService/GetUserStatus`），不需要企业 service key。凭证来自本机已有的登录态，按顺序探测：
+## Features
 
-1. `%APPDATA%\devin\credentials.toml`（`devin auth login` 生成）
-2. Devin Desktop 的 `state.vscdb`（`windsurfAuthStatus`）
+- **Floating orb**: black glass ball, white clock hands, quota ring (green → amber → red as quota drains), breathing/hover/ripple animations
+- **Usage panel**: click the orb to pop a glass card with quota bars and balance; spring entrance animation
+- **Devin toast interception**: when Devin posts a Windows notification (session done, permission needed, question), the Windows banner is suppressed and the message appears as a speech bubble above the orb; the orb bounces and pulls out from the screen edge; click the bubble to bring Devin to the foreground
+- **Edge docking**: drag the orb to a screen edge — it retracts into a half-circle after idle (quota ring still visible on the exposed edge); hover or click pulls it back out
+- **Panel follows orb**: the panel tracks the orb live while dragging, docking, and retracting
+- **Settings**: ring source (auto/daily/weekly), ring mode (remaining/used), theme (auto/light/dark), language (中文/English), refresh interval (5/10/50 min or custom minutes), launch with Devin, start on login
 
-**隐私**：所有数据只在本机读取与展示，API key 不写入任何本项目文件、不进入日志、不外传。配置存于 `%APPDATA%\devin-orb\config.json`。
+## Data source
 
-## 运行
+Reads the same read-only endpoint the Devin client uses (`SeatManagementService/GetUserStatus`) — no enterprise service key required. Credentials come from your existing local sign-in, probed in order:
 
-需要 Python 3.10+：
+1. `%APPDATA%\devin\credentials.toml` (created by `devin auth login`)
+2. Devin Desktop's `state.vscdb` (`windsurfAuthStatus`)
+
+**Privacy**: all data is read and displayed locally only. The API key is never written to any project file, never logged, never sent anywhere. Settings live in `%APPDATA%\devin-orb\config.json`.
+
+## Quick start
+
+Download `DevinOrb-*-win-x64.zip` from [Releases](../../releases), unzip anywhere, run `DevinOrb.exe`.
+
+Or run from source (Python 3.10+):
 
 ```bash
-pip install PySide6
-python app.py        # 或 pythonw app.py 无窗口后台运行
+pip install -r requirements.txt
+python app.py        # or pythonw app.py for background
 ```
 
-## 功能
+## Controls
 
-| 功能 | 说明 |
+| Action | Result |
 |---|---|
-| 单击 | 打开/收起用量面板 |
-| 双击 | 打开面板并钉住（可在设置关闭） |
-| 拖拽 | 移动悬浮球，位置自动记忆 |
-| 右键 | 打开设置抽屉 |
-| 配额环 | 剩余/已用可选，数据源 自动/每日/每周 |
-| 主题 | 跟随 OpenUsage / 浅色 / 深色（Devin 黑白配色） |
-| 语言 | 中文 / English 一键切换 |
-| 自动刷新 | 5 / 10 / 50 分钟 |
-| 随 Devin 启动 | 自动注入 Devin SessionStart hook（可在设置中移除） |
-| 开机自启 | 可选 |
+| Click | Open/close the usage panel |
+| Double-click | Pin the panel above other windows |
+| Drag | Move the orb; position persists; drops near an edge dock to that edge |
+| Right-click | Open the settings drawer |
+| Click bubble | Dismiss and raise Devin to the foreground |
 
-## 项目结构
+## Project layout
 
 ```
-app.py       # Qt 悬浮球 + 面板窗口 + 生命周期
-core.py      # 凭证发现 + GetUserStatus RPC + 数据归一化
-config.py    # 设置持久化 / OpenUsage 同步 / 自启 / Devin hook 注入
-web/panel.html  # 面板 UI（QWebEngineView + QWebChannel）
+app.py       # Qt orb + panel + speech bubble + animations + lifecycle
+core.py      # credential discovery + GetUserStatus RPC + data normalization
+config.py    # settings persistence / OpenUsage theme sync / autostart / Devin hook
+notify.py    # event-driven toast interception (WinEvent + UI Automation), no polling
 ```
 
 ## License
 
-MIT — 见 [LICENSE](LICENSE)。
+MIT — see [LICENSE](LICENSE).
