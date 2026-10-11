@@ -152,12 +152,13 @@ def state_payload() -> dict:
 from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QRect,
                             QRectF, Qt, QTimer, QPropertyAnimation, Signal,
                             Property)
-from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication,
+from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication, QIcon,
                            QIntValidator, QLinearGradient, QPainter, QPen,
-                           QRadialGradient)
+                           QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QLayout, QLineEdit, QPushButton, QSizePolicy,
-                               QVBoxLayout, QWidget)
+                               QLayout, QLineEdit, QMenu, QPushButton,
+                               QSizePolicy, QSystemTrayIcon, QVBoxLayout,
+                               QWidget)
 
 
 # --- the orb ------------------------------------------------------------------
@@ -593,6 +594,7 @@ I18N = {
                sSrc="配额环数据源", sTheme="主题", sRefresh="自动刷新",
                sLogin="开机自启", sDevin="随 Devin 启动",
                quit="退出悬浮球", on="开", off="关",
+               tOpen="打开面板", tSettings="设置", tQuit="退出",
                auto="自动", dailyS="每日", weeklyS="每周",
                follow="跟随OU", light="浅", dark="深",
                custom="自定义", customLbl="自定义间隔", ok="确定",
@@ -607,6 +609,7 @@ I18N = {
                sSrc="Ring source", sTheme="Theme", sRefresh="Auto refresh",
                sLogin="Start on login", sDevin="Launch with Devin",
                quit="Quit orb", on="On", off="Off",
+               tOpen="Open panel", tSettings="Settings", tQuit="Quit",
                auto="Auto", dailyS="Daily", weeklyS="Weekly",
                follow="OU", light="Light", dark="Dark",
                custom="Custom", customLbl="Custom interval", ok="OK",
@@ -1540,6 +1543,8 @@ def apply_setting(key, value):
         ok = (config.install_devin_hook(script) if v
               else config.remove_devin_hook())
         log(f"devin_hook {'installed' if v else 'removed'} ok={ok}")
+    if key == "language" and TRAY:
+        _rebuild_tray_menu()
     push_orb()
     push_panel()
 
@@ -1592,10 +1597,63 @@ def theme_watch_loop():
             pass
 
 
+# --- system tray ----------------------------------------------------------------
+
+def _tray_icon() -> QIcon:
+    """Paint the orb face as the tray icon (no file dependency)."""
+    sz = 64
+    pm = QPixmap(sz, sz)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    m = sz * 0.06
+    # obsidian ball
+    g = QRadialGradient(sz * 0.35, sz * 0.3, sz * 0.65)
+    g.setColorAt(0, QColor(60, 60, 68))
+    g.setColorAt(1, QColor(10, 10, 12))
+    p.setPen(Qt.NoPen)
+    p.setBrush(g)
+    p.drawEllipse(QRectF(m, m, sz - 2 * m, sz - 2 * m))
+    # quota ring
+    p.setPen(QPen(QColor(52, 211, 153), sz * 0.05))
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(QRectF(m * 1.6, m * 1.6, sz - 3.2 * m, sz - 3.2 * m))
+    # white hands at 10:10
+    cx = cy = sz / 2
+    p.setPen(QPen(Qt.white, sz * 0.045, Qt.SolidLine, Qt.RoundCap))
+    p.drawLine(QPointF(cx, cy), QPointF(cx - sz * 0.12, cy - sz * 0.11))
+    p.drawLine(QPointF(cx, cy), QPointF(cx + sz * 0.02, cy - sz * 0.23))
+    p.end()
+    return QIcon(pm)
+
+
+def _rebuild_tray_menu():
+    i = I18N[S.cfg.get("language", "zh")]
+    m = QMenu()
+    m.setStyleSheet(
+        "QMenu { background:rgba(24,24,28,245); color:#e8e8ec;"
+        " border:1px solid rgba(255,255,255,30); border-radius:10px;"
+        " padding:6px; }"
+        "QMenu::item { padding:7px 26px 7px 16px; border-radius:6px; }"
+        "QMenu::item:selected { background:rgba(255,255,255,18); }"
+        "QMenu::separator { height:1px; margin:5px 10px;"
+        " background:rgba(255,255,255,20); }")
+    m.addAction(i["tOpen"], lambda: toggle_panel())
+    m.addAction(i["tSettings"], lambda: show_panel(open_settings=True))
+    m.addSeparator()
+    m.addAction(i["tQuit"], QApplication.quit)
+    TRAY.setContextMenu(m)
+
+
+def on_tray_activated(reason):
+    if reason == QSystemTrayIcon.Trigger:
+        toggle_panel()
+
+
 # --- main -----------------------------------------------------------------------
 
 def main():
-    global APP, ORB, PANEL, BUB
+    global APP, ORB, PANEL, BUB, TRAY
     if not ensure_single_instance():
         log("another instance running; exiting")
         return
@@ -1607,6 +1665,13 @@ def main():
     ORB = OrbWindow()
     PANEL = PanelWindow()
     BUB = NotifyBubble()
+
+    # system tray icon: left click toggles the panel, right click menu
+    TRAY = QSystemTrayIcon(_tray_icon())
+    TRAY.setToolTip("Devin Orb")
+    TRAY.activated.connect(on_tray_activated)
+    _rebuild_tray_menu()
+    TRAY.show()
 
     ORB.openRequested.connect(on_orb_click)
     ORB.pinRequested.connect(on_orb_dblclick)
