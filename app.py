@@ -149,9 +149,9 @@ def state_payload() -> dict:
 
 # --- Qt imports (deferred so --help-ish failures stay cheap) -------------------
 
-from PySide6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QRect,
-                            QRectF, Qt, QTimer, QPropertyAnimation, Signal,
-                            Property)
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve,
+                            QObject, QPoint, QPointF, QRect, QRectF, Qt,
+                            QTimer, QPropertyAnimation, Signal, Property)
 from PySide6.QtGui import (QColor, QConicalGradient, QGuiApplication, QIcon,
                            QIntValidator, QLinearGradient, QPainter, QPen,
                            QPixmap, QRadialGradient)
@@ -246,8 +246,17 @@ class OrbWindow(QWidget):
         self.moved.emit()
         return False
 
+    def respawn(self):
+        """Rebuild the backing surface. Qt's translucent layered window
+        can silently stop compositing after display/compositor events
+        (resolution switch, monitor sleep, session lock) — the HWND then
+        reports visible/on-screen but paints nothing. hide+show fixes it."""
+        self.hide()
+        self.show()
+
     def on_screen_changed(self):
         """Resolution/monitor topology changed — recover & re-dock."""
+        self.respawn()
         self.ensure_on_screen()
         self._dock_edge = self._detect_edge()
         if self._dock_edge:
@@ -1528,6 +1537,7 @@ def toggle_panel():
         hide_panel()
     else:
         ORB.ensure_on_screen()   # orb may have been left off-screen
+        ORB.respawn()            # or its surface may have died silently
         show_panel()
 
 
@@ -1734,6 +1744,26 @@ def main():
     APP.screenAdded.connect(_watch_screen)
     APP.screenRemoved.connect(
         lambda *_: ORB.on_screen_changed())
+
+    # display sleep / resume and other events that do NOT change screen
+    # geometry (so Qt emits nothing) — the orb's layered surface can die
+    # silently there; watch the raw Win32 messages and respawn it
+    class _NativeWatch(QAbstractNativeEventFilter):
+        _MSG = {0x007E}          # WM_DISPLAYCHANGE
+        _PWR = {0x0218}          # WM_POWERBROADCAST
+
+        def nativeEventFilter(self, et, msg):
+            if et == b"windows_generic_MSG":
+                m = wt.MSG.from_address(int(msg))
+                if (m.message in self._MSG
+                        or (m.message in self._PWR
+                            and m.wParam in (0x07, 0x12))):
+                    QTimer.singleShot(
+                        400, ORB.on_screen_changed)
+            return False, 0
+
+    APP._native_watch = _NativeWatch()   # keep a Python ref alive
+    APP.installNativeEventFilter(APP._native_watch)
 
     # first run: inject the SessionStart hook so the orb also launches with
     # Devin sessions (removable via the settings toggle).
