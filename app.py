@@ -220,9 +220,40 @@ class OrbWindow(QWidget):
     # -- edge docking -----------------------------------------------------------
 
     def _avail(self):
-        scr = QGuiApplication.screenAt(self.geometry().center()) \
-            or QGuiApplication.primaryScreen()
+        c = self.geometry().center()
+        scr = QGuiApplication.screenAt(c)
+        if scr is None:
+            # center sits outside every screen (edge-retracted orb, or a
+            # resolution change left us off-screen) — fall back to the
+            # NEAREST screen, not blindly to the primary one
+            def _dist(s):
+                a = s.availableGeometry()
+                dx = max(a.left() - c.x(), 0, c.x() - a.right())
+                dy = max(a.top() - c.y(), 0, c.y() - a.bottom())
+                return dx * dx + dy * dy
+            scr = min(QGuiApplication.screens(), key=_dist)
         return scr.availableGeometry()
+
+    def ensure_on_screen(self):
+        """Pull the orb back inside the nearest screen if fully outside."""
+        g = self.geometry()
+        if any(s.availableGeometry().intersects(g)
+               for s in QGuiApplication.screens()):
+            return True
+        a = self._avail()
+        self.move(int(min(max(g.x(), a.left()), a.right() - ORB_WIN + 1)),
+                  int(min(max(g.y(), a.top()), a.bottom() - ORB_WIN + 1)))
+        self.moved.emit()
+        return False
+
+    def on_screen_changed(self):
+        """Resolution/monitor topology changed — recover & re-dock."""
+        self.ensure_on_screen()
+        self._dock_edge = self._detect_edge()
+        if self._dock_edge:
+            self._slide_to(self._in_x() if self._docked_in
+                           else self._flush_x())
+        self._arm_idle()
 
     def _detect_edge(self):
         """'L'/'R' if the window hugs a screen edge, else None."""
@@ -1496,6 +1527,7 @@ def toggle_panel():
         config.update(panel_pinned=False)
         hide_panel()
     else:
+        ORB.ensure_on_screen()   # orb may have been left off-screen
         show_panel()
 
 
@@ -1691,6 +1723,17 @@ def main():
     ORB.move(ox, oy)
     ORB.show()
     ORB.dock_check()
+
+    # display topology changes (resolution switches, monitor (un)plugs,
+    # fullscreen games): pull the orb back on-screen and re-dock
+    def _watch_screen(s):
+        s.geometryChanged.connect(
+            lambda *_: ORB.on_screen_changed())
+    for s in QGuiApplication.screens():
+        _watch_screen(s)
+    APP.screenAdded.connect(_watch_screen)
+    APP.screenRemoved.connect(
+        lambda *_: ORB.on_screen_changed())
 
     # first run: inject the SessionStart hook so the orb also launches with
     # Devin sessions (removable via the settings toggle).
