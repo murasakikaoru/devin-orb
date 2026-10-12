@@ -60,6 +60,7 @@ python app.py        # or pythonw app.py for background
 | Drag | Move the orb; position persists; drops near an edge dock to that edge |
 | Right-click | Open the settings drawer |
 | Click bubble | Dismiss and raise Devin to the foreground |
+| Tray icon | Left-click toggles the panel; right-click menu (open / settings / quit) |
 
 ## Project layout
 
